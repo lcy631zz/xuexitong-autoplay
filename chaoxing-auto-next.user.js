@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         超星学习通 · 自动播放 + 播完自动下一节
 // @namespace    workbuddy.chaoxing.autonext
-// @version      1.3.2
-// @description  自动播放当前章节的视频；播放完成后自动点击右侧目录的下一节并继续播放。不加速、不绕过平台的防挂机检测（视频内弹出的单选题会自动逐个尝试作答）。
+// @version      1.3.3
+// @description  自动播放当前章节的视频；播放完成后自动点击右侧目录的下一节并继续播放。不加速、不绕过平台的防挂机检测（视频内弹出的单选/多选题会自动尝试作答，多选暴力枚举组合）。
 // @author       WorkBuddy
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
 // @grant        none
@@ -22,14 +22,17 @@
  * 明确不做（也请你自己不要去找别的脚本做）：
  *   × 不加速播放
  *   × 不在你切走窗口时偷偷续播（那是伪造观看记录）
- *   × 不自动答【多选题 / 需要输入或论述】的题，也不自动过滑块验证码
+ *   × 不自动答【需要输入或论述】的题（填空题），也不自动过滑块验证码
  *   × 遇到文档/章节测验节点会停下来提醒你，不会替你跳过
  *   × 不绕过平台的防挂机风控（超星有 9010 风控验证码，触发后需人工输入）
  *
- * 关于"视频内弹题"：部分章节视频中途会弹出【单选题】。
- *   这类题脚本会真实点击——逐个选项尝试提交，答错（平台弹 alert）就换下一个，
- *   直到答对（弹题消失）或试完所有选项。不伪造、不绕过，纯前端自动点。
- *   多选题/填空题不参与自动作答，会停下等你自己做。
+ * 关于"视频内弹题"：部分章节视频中途会弹出【单选题 / 多选题】。
+ *   脚本会真实点击作答：
+ *     - 单选：逐个选项尝试提交，答错（平台弹 alert）就换下一个，直到答对（弹题消失）或试完；
+ *     - 多选：暴力枚举所有"选项组合"（2ⁿ−1 种），逐个提交，答错换下一组，直到答对或试完。
+ *   不伪造、不绕过，纯前端自动点。
+ *   多选题组合数过多（默认 > 31 种，约 > 5 个选项）时担心触发平台风控，会停下交给你手动。
+ *   填空题不参与自动作答，会停下等你自己做。
  */
 
 (function () {
@@ -53,6 +56,8 @@
     NEXT_WAIT_MS: 3000,   // 判定播完后等多久再切下一节（给平台上报进度留时间）
     AUTOSTART: false,     // 打开页面是否自动开始
     MUTED: true,          // 默认静音播放（浏览器普遍拦截"带声音的自动播放"，静音才稳；面板可一键切回有声）
+    MULTI_CHOICE: true,   // 是否自动答多选题（暴力枚举组合；关闭则多选题停下等手动）
+    MULTI_MAX_COMBOS: 31, // 多选题最多尝试的组合数（≈5 个选项上限；超了怕触发风控，改手动）
     LOG_MAX: 120,         // 面板最多保留多少行日志
   };
 
@@ -207,7 +212,7 @@
     return null;
   }
 
-  /* 多选题（checkbox）不参与自动作答 */
+  /* 多选题（checkbox）自动尝试作答；单选（radio）逐选项尝试 */
   function isMultiChoice(opts) {
     for (let i = 0; i < opts.length; i++) {
       if (opts[i].type === 'checkbox') return true;
@@ -215,7 +220,48 @@
     return false;
   }
 
-  /* 单选题自动作答：逐个选项尝试提交，答错就换下一个，直到答对（弹题消失） */
+  /* 多选题组合 SIZE 的尝试优先级（按用户经验手填）：
+       多选题至少选 2 个，所以 size=1 的组合永远不可能是答案，直接从枚举里剔除。
+       3 个选项：全选(=3)优先，再试 2 个
+       4 个选项：3 个优先，再 2 个，最后全选
+       其它题量(5/6…)：从 N−1 递减到 2，最后全选（保守默认；6 个以上超上限会直接跳过） */
+  function combosPriority(n) {
+    if (n === 3) return [3, 2];          // 全选(=3)优先，再试 2 个
+    if (n === 4) return [3, 2, 4];       // 3 个优先，再 2 个，最后全选
+    const o = [];
+    for (let s = n - 1; s >= 2; s--) o.push(s); // 从 N−1 递减到 2（跳过单选式的 1 个）
+    o.push(n);                          // 全选（N 个全勾）放最后
+    return o;
+  }
+
+  /* 生成要尝试的"选项组合"列表：
+     - 单选：每个选项是单独一组 [[0],[1],...]
+     - 多选：所有非空子集，按 combosPriority 给定的"选项个数"顺序枚举。
+       组合数 = 2ⁿ − 1；超过 CFG.MULTI_MAX_COMBOS 就不自动答，避免尝试次数过多触发平台风控 */
+  function buildCombos(n, multi) {
+    const arr = [];
+    if (!multi) {
+      for (let i = 0; i < n; i++) arr.push([i]);
+      return arr;
+    }
+    const total = (1 << n) - 1;
+    const order = combosPriority(n);
+    for (let o = 0; o < order.length; o++) {
+      const size = order[o];
+      if (size < 1 || size > n) continue;
+      const bucket = [];
+      for (let mask = 1; mask <= total; mask++) {
+        const combo = [];
+        for (let b = 0; b < n; b++) if (mask & (1 << b)) combo.push(b);
+        if (combo.length === size) bucket.push(combo);
+      }
+      for (let k = 0; k < bucket.length; k++) arr.push(bucket[k]);
+    }
+    return arr;
+  }
+
+  /* 弹题自动作答：单选逐个选项、多选暴力枚举组合，逐个提交；
+     答错（平台弹 alert）就换下一组，直到答对（弹题消失）或试完/超上限 */
   function handleQuiz() {
     const q = findQuiz();
     if (!q) {
@@ -227,41 +273,47 @@
       return false; /* 交还给主循环处理视频 */
     }
 
-    if (isMultiChoice(q.opts)) {
-      setStatus('⏸ 弹题是多选题，脚本不代答，请手动作答');
-      log('⏸ 检测到多选题，自动作答仅支持单选，已停下等手动', 'warn');
+    const multi = isMultiChoice(q.opts);
+
+    if (multi && !CFG.MULTI_CHOICE) {
+      setStatus('⏸ 弹题是多选题，已按设置不代答，请手动作答');
+      log('⏸ 检测到多选题，自动作答（多选）已关闭，已停下等手动', 'warn');
       return true;
     }
 
     /* 初始化该题状态（以"提交按钮"为同一题的标识） */
     if (!quizState || quizState.submitBtn !== q.submitBtn) {
+      const n = q.opts.length;
+      const combos = buildCombos(n, multi);
       quizState = {
         doc: q.doc, opts: q.opts, submitBtn: q.submitBtn,
-        idx: 0,
+        multi: multi, n: n, combos: combos, combIdx: 0,
         alertBase: q.doc.__cxLastAlert ? q.doc.__cxLastAlert.time : 0,
         pending: false, pendingSince: 0, submitted: false, done: false
       };
-      log('弹题：开始自动作答（单选题，逐个试直到正确）', 'warn');
+      log(multi
+        ? ('弹题：开始自动作答（多选题，枚举 ' + combos.length + ' 种组合，逐个试直到正确）')
+        : ('弹题：开始自动作答（单选题，逐个试直到正确）'), 'warn');
     }
     const st = quizState;
 
-    /* 处于"等待平台反馈"阶段 */
     if (st.pending) {
       st.submitted = true;
       const la = q.doc.__cxLastAlert;
       if (la && la.time > st.alertBase) {
-        /* 平台弹了 alert = 答错，换下一个选项 */
+        /* 平台弹了 alert = 答错，换下一组组合 */
         st.alertBase = la.time;
-        var tried = st.idx + 1;
-        st.idx += 1;
+        st.combIdx += 1;
         st.pending = false;
-        if (st.idx >= st.opts.length) {
+        if (st.combIdx >= st.combos.length) {
           st.done = true;
-          setStatus('⏸ 所有选项都试过仍不对（可能题目有变动或非单选），请手动作答');
-          log('⏸ 弹题所有选项（共 ' + tried + ' 个）都试过仍不对，请手动作答', 'err');
+          setStatus('⏸ 所有组合都试过仍不对（可能题目有变动或非标准多选），请手动作答');
+          log('⏸ 弹题已试完全部 ' + st.combos.length + ' 种组合仍不对，请手动作答', 'err');
           return true;
         }
-        log('弹题：第 ' + tried + ' 个选项答错，换第 ' + (st.idx + 1) + ' 个试试', 'warn');
+        log(multi
+          ? ('弹题：第 ' + st.combIdx + '/' + st.combos.length + ' 种组合答错，换下一种试试')
+          : ('弹题：第 ' + st.combIdx + ' 个选项答错，换第 ' + (st.combIdx + 1) + ' 个试试'), 'warn');
       } else if (Date.now() - st.pendingSince > 8000) {
         /* 8 秒既没"答错"提示、弹题也还在：属异常情况，交给人工确认，避免乱提交 */
         st.done = true;
@@ -270,21 +322,39 @@
         return true;
       } else {
         /* 还在等反馈，先返回，下一轮再判断 */
-        setStatus('弹题：已选第 ' + (st.idx + 1) + '/' + st.opts.length + ' 个选项，等待反馈…');
+        setStatus(multi
+          ? ('弹题：已试第 ' + (st.combIdx + 1) + '/' + st.combos.length + ' 种组合，等待反馈…')
+          : ('弹题：已选第 ' + (st.combIdx + 1) + '/' + st.n + ' 个选项，等待反馈…'));
         return true;
       }
     }
 
     if (st.done) return true;
 
-    /* 提交第 st.idx 个选项 */
-    const opt = st.opts[st.idx];
-    try { opt.checked = true; } catch (e) {}
-    realClick(opt);
-    try { opt.click(); } catch (e) {}
-    try {
-      opt.dispatchEvent(new q.doc.defaultView.Event('change', { bubbles: true }));
-    } catch (e) {}
+    /* 安全上限：多选题组合数过多（选项多）时，尝试次数会很大、易触发风控，直接停下交人工 */
+    if (st.multi && st.combos.length > CFG.MULTI_MAX_COMBOS) {
+      st.done = true;
+      setStatus('⏸ 多选题选项过多（' + st.n + ' 个，组合数超 ' + CFG.MULTI_MAX_COMBOS + '），自动作答风险太高，请手动作答');
+      log('⏸ 多选题有 ' + st.n + ' 个选项，组合数超 ' + CFG.MULTI_MAX_COMBOS + '，已停下等手动', 'warn');
+      return true;
+    }
+
+    /* 提交第 st.combIdx 组组合 */
+    const combo = st.combos[st.combIdx];
+    if (st.multi) {
+      /* 多选：先把所有框取消勾选，再勾选这一组的 */
+      for (let i = 0; i < st.opts.length; i++) {
+        try { st.opts[i].checked = false; } catch (e) {}
+        try { st.opts[i].dispatchEvent(new q.doc.defaultView.Event('change', { bubbles: true })); } catch (e) {}
+      }
+    }
+    for (let k = 0; k < combo.length; k++) {
+      const opt = st.opts[combo[k]];
+      try { opt.checked = true; } catch (e) {}
+      realClick(opt);
+      try { opt.click(); } catch (e) {}
+      try { opt.dispatchEvent(new q.doc.defaultView.Event('change', { bubbles: true })); } catch (e) {}
+    }
 
     st.alertBase = q.doc.__cxLastAlert ? q.doc.__cxLastAlert.time : 0;
     st.pending = true;
@@ -294,7 +364,9 @@
     realClick(st.submitBtn);
     try { st.submitBtn.click(); } catch (e) {}
 
-    setStatus('弹题：已选第 ' + (st.idx + 1) + '/' + st.opts.length + ' 个选项，等待反馈…');
+    setStatus(multi
+      ? ('弹题：已试第 ' + (st.combIdx + 1) + '/' + st.combos.length + ' 种组合，等待反馈…')
+      : ('弹题：已选第 ' + (st.combIdx + 1) + '/' + st.n + ' 个选项，等待反馈…'));
     return true;
   }
 
@@ -477,7 +549,7 @@
     }
     if (!running || switching) return;
 
-    /* 视频内弹题优先处理：单选题自动作答；多选题停下等手动；无弹题则往下走 */
+    /* 视频内弹题优先处理：单选/多选自动作答（多选枚举组合）；无弹题则往下走 */
     if (findQuiz()) {
       const handled = handleQuiz();
       if (handled) return; /* 还在处理弹题（提交/等待反馈/答错/等手动），先不播视频 */

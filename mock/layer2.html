@@ -34,14 +34,10 @@
   </div>
   <div class="pane" id="pane-quiz" style="display:none">章节测验内容</div>
 
-  <!-- 视频内弹题（单选题），正确答案 = 选项 C（value=2） -->
+  <!-- 视频内弹题：奇数节=单选(radio)，偶数节=多选(checkbox)，选项由 JS 动态生成 -->
   <div id="vq">
-    <div class="qtitle">视频内弹题（单选题）</div>
-    <div class="ans-videoquiz-opts">
-      <label><input type="radio" name="ans-videoquiz-opt" value="0"> 选项 A</label>
-      <label><input type="radio" name="ans-videoquiz-opt" value="1"> 选项 B</label>
-      <label><input type="radio" name="ans-videoquiz-opt" value="2"> 选项 C</label>
-    </div>
+    <div class="qtitle" id="vq-title">视频内弹题</div>
+    <div class="ans-videoquiz-opts" id="vq-opts"></div>
     <button class="ans-videoquiz-submit">提交</button>
   </div>
 
@@ -49,6 +45,22 @@
   var n = new URLSearchParams(location.search).get('n') || '1';
   var v = document.getElementById('v');
   v.setAttribute('src', 'mock-ch' + n + '.mp4');
+
+  /* ---------- 弹题模式：奇数节=单选(radio)，偶数节=多选(checkbox) ---------- */
+  var MODE = (Number(n) % 2 === 1) ? 'single' : 'multi';
+  var SINGLE_CORRECT = '2';        // 单选正确答案 = 选项 C
+  var MULTI_CORRECT = ['0', '2'];  // 多选正确答案 = 选项 A + C
+  (function () {
+    var title = document.getElementById('vq-title');
+    if (title) title.textContent = (MODE === 'single') ? '视频内弹题（单选题）' : '视频内弹题（多选题）';
+    var html = '';
+    for (var oi = 0; oi < 3; oi++) {
+      var type = (MODE === 'single') ? 'radio' : 'checkbox';
+      html += '<label><input type="' + type + '" name="ans-videoquiz-opt" value="' + oi + '"> 选项 ' + String.fromCharCode(65 + oi) + '</label>';
+    }
+    var box = document.getElementById('vq-opts');
+    if (box) box.innerHTML = html;
+  })();
 
   /* ---------- 任务点标签页 ---------- */
   var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
@@ -80,20 +92,27 @@
 
   document.getElementById('tabs').addEventListener('click', function () { window.__tabClicks++; });
 
-  /* ---------- 视频内弹题模拟（正确答案 = C / value 2） ---------- */
+  /* ---------- 视频内弹题模拟 ---------- */
   var vq = document.getElementById('vq');
-  var CORRECT = '2';
   window.__quizShown = false;
   window.__quizSolved = false;
-  window.__quizLog = [];   // 记录每次「提交」时选中的 value
+  window.__quizLog = [];   // 记录每次「提交」时选中的 value（多选记成 "0,2" 形式）
 
   document.querySelector('#vq .ans-videoquiz-submit').addEventListener('click', function () {
     if (vq.style.display === 'none') return;           // 已作答成功，忽略重复 click
-    var checked = vq.querySelector('input[name="ans-videoquiz-opt"]:checked');
-    if (!checked) { alert('请选择一个答案'); return; }
-    var val = checked.value;
-    window.__quizLog.push(val);
-    if (val === CORRECT) {
+    var checked = Array.prototype.slice.call(
+      vq.querySelectorAll('input[name="ans-videoquiz-opt"]:checked'));
+    if (!checked.length) { alert('请选择一个答案'); return; }
+    var vals = checked.map(function (i) { return i.value; }).sort();
+    window.__quizLog.push(vals.join(','));
+    var correct;
+    if (MODE === 'single') {
+      correct = (vals.length === 1 && vals[0] === SINGLE_CORRECT);
+    } else {
+      correct = (vals.length === MULTI_CORRECT.length) &&
+                MULTI_CORRECT.every(function (v2) { return vals.indexOf(v2) !== -1; });
+    }
+    if (correct) {
       vq.style.display = 'none';
       window.__quizSolved = true;
       v.play();                                        // 答对 → 恢复播放
@@ -112,7 +131,7 @@
 
   window.__state = function () {
     return {
-      n: n, tab: window.__tab, t: v.currentTime, paused: v.paused, ended: v.ended,
+      n: n, mode: MODE, tab: window.__tab, t: v.currentTime, paused: v.paused, ended: v.ended,
       playCalls: window.__playCalls, quizShown: window.__quizShown,
       quizSolved: window.__quizSolved, quizLog: window.__quizLog.slice()
     };
