@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         超星学习通 · 自动播放 + 播完自动下一节
 // @namespace    workbuddy.chaoxing.autonext
-// @version      1.3.4
+// @version      1.3.5
 // @description  自动播放当前章节的视频；播放完成后自动点击右侧目录的下一节并继续播放。不加速、不绕过平台的防挂机检测（视频内弹出的单选/多选题会自动尝试作答，多选暴力枚举组合）。
 // @author       WorkBuddy
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -15,7 +15,7 @@
  * ---------------------------------------------------------------
  * 本脚本只做两件"免手动操作"的事：
  *   1) 进入某节后，自动点一下播放键（你本来也要点的）；
- *   2) 当前视频真正播到结尾（100%，"看完"型任务点才算完成）后，自动点右侧目录的下一节。
+ *   2) 当前视频播到"进度 ≥ 90%（或播放结束 ended）"后，自动点右侧目录的下一节。
  * 视频仍然按 1 倍速、在前台、真实播放完整时长，不改学习记录。
  * 默认【静音】自动播放（浏览器普遍拦截"带声音的自动播放"，静音才稳；面板右侧 🔇/🔊 可一键切回有声）。
  *
@@ -52,7 +52,7 @@
    * ================================================================ */
   const CFG = {
     POLL_MS: 1500,        // 轮询间隔（毫秒）
-    FINISH_RATIO: 0.999,  // 必须真正播到结尾才切下一节（"要求全部看完"的视频，提前到 98% 会导致任务点判未完成）；0.999 仅作 ended 不触发时的兜底
+    FINISH_RATIO: 0.90,   // 进度 ≥ 90%（或视频 ended）即判定播完并切下一节。注意：低于 100% 时，"要求全部看完"的视频任务点可能仍判未完成
     NEXT_WAIT_MS: 6000,   // 判定播完后等多久再切下一节（给平台上报 100% 进度留时间，避免任务点没记上就跳走了）
     AUTOSTART: false,     // 打开页面是否自动开始
     MUTED: true,          // 默认静音播放（浏览器普遍拦截"带声音的自动播放"，静音才稳；面板可一键切回有声）
@@ -603,8 +603,9 @@
       setStatus('播放中 ' + (ratio * 100).toFixed(1) + '%  (' +
                 fmtTime(v.currentTime) + ' / ' + fmtTime(v.duration) + ')');
 
-      /* 「要求全部看完」：必须真正播到结尾（-ended- 或进度≈100%）才切下一节，
-         不在 98% 就提前跳，否则长视频会差一大截没看满、任务点判未完成 */
+      /* 完成判定：进度 ≥ 90%（CFG.FINISH_RATIO）或视频 ended 即切下一节。
+         注：90% 比 100% 早跳；若某节"要求全部看完"，任务点可能仍判未完成——
+         需要严格看满请改回 0.999，或启用"先等 ended、超时再按 90% 兜底"的逻辑 */
       if (v.ended || ratio >= CFG.FINISH_RATIO) {
         switching = true;
         const pct = (ratio * 100).toFixed(1);
@@ -706,7 +707,7 @@
       '    <button id="cx-mute" title="切换静音/有声" style="cursor:pointer;border:1px solid #d0d5dd;border-radius:6px;padding:7px 9px;background:#fff;font-size:13px;">🔇</button>',
       '  </div>',
       '  <div id="cx-log" style="max-height:150px;overflow-y:auto;border-top:1px solid #eceff3;padding-top:6px;"></div>',
-      '  <div style="color:#98a2b3;margin-top:6px;">1 倍速 · 默认静音 · 看满 100% 才跳下一节 · 不绕过检测</div>',
+      '  <div style="color:#98a2b3;margin-top:6px;">1 倍速 · 默认静音 · 进度≥90% 跳下一节 · 不绕过检测</div>',
       '</div>'
     ].join('');
 
