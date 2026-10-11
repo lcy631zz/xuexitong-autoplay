@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>layer2 - 播放器</title>
+<style>
+  html,body{margin:0;height:100%;background:#111;color:#eee;font:14px "Microsoft YaHei",sans-serif;position:relative}
+  .tabs{display:flex;gap:6px;padding:8px 10px;background:#1c1c1c}
+  .tab{padding:5px 12px;border-radius:4px;background:#2a2a2a;color:#bbb;cursor:pointer}
+  .tab.on{background:#3b6ea5;color:#fff}
+  .pane{padding:0 10px}
+  #pane-basic{height:70%;background:#333;display:flex;align-items:center;justify-content:center;color:#999}
+  video{width:100%;height:70%;background:#000;object-fit:contain}
+  #hud{padding:8px 12px;color:#8f8}
+  /* 视频内弹题（模拟超星 ans-videoquiz） */
+  #vq{display:none;position:absolute;left:12px;top:80px;width:300px;background:#fff;color:#222;
+      border:1px solid #ccc;border-radius:8px;padding:12px;z-index:50;font-size:13px}
+  #vq .qtitle{font-weight:700;margin-bottom:8px}
+  #vq label{display:block;padding:4px 0;cursor:pointer}
+  #vq .ans-videoquiz-submit{margin-top:10px;padding:6px 16px;border:0;border-radius:6px;
+      background:#1a7f37;color:#fff;cursor:pointer}
+</style>
+</head>
+<body>
+  <div class="tabs" id="tabs">
+    <span class="tab" data-i="0">1 基础知识</span>
+    <span class="tab" data-i="1">2 文档</span>
+    <span class="tab" data-i="2">3 视频</span>
+    <span class="tab" data-i="3">4 章节测验</span>
+  </div>
+
+  <div class="pane" id="pane-basic">基础知识内容（默认落在这里）</div>
+  <div class="pane" id="pane-video" style="display:none">
+    <video id="v"></video>
+    <div id="hud">--</div>
+  </div>
+  <div class="pane" id="pane-quiz" style="display:none">章节测验内容</div>
+
+  <!-- 视频内弹题（单选题），正确答案 = 选项 C（value=2） -->
+  <div id="vq">
+    <div class="qtitle">视频内弹题（单选题）</div>
+    <div class="ans-videoquiz-opts">
+      <label><input type="radio" name="ans-videoquiz-opt" value="0"> 选项 A</label>
+      <label><input type="radio" name="ans-videoquiz-opt" value="1"> 选项 B</label>
+      <label><input type="radio" name="ans-videoquiz-opt" value="2"> 选项 C</label>
+    </div>
+    <button class="ans-videoquiz-submit">提交</button>
+  </div>
+
+<script>
+  var n = new URLSearchParams(location.search).get('n') || '1';
+  var v = document.getElementById('v');
+  v.setAttribute('src', 'mock-ch' + n + '.mp4');
+
+  /* ---------- 任务点标签页 ---------- */
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
+  function showTab(i) {
+    tabs.forEach(function (t, k) { t.classList.toggle('on', k === i); });
+    document.getElementById('pane-basic').style.display = (i === 0) ? 'flex' : 'none';
+    document.getElementById('pane-video').style.display = (i === 2) ? 'block' : 'none';
+    document.getElementById('pane-quiz').style.display  = (i === 3) ? 'block' : 'none';
+    window.__tab = i;
+  }
+  tabs.forEach(function (t, k) { t.addEventListener('click', function () { showTab(k); }); });
+  /* 奇数节默认落在「基础知识」（视频要手动点进去），偶数节直接进视频 */
+  showTab((Number(n) % 2 === 1) ? 0 : 2);
+
+  /* ---------- 假视频：进度用 Date.now() 算，不受后台节流影响 ---------- */
+  var DUR = 8, MS_PER_SEC = 125, accum = 0, segStart = 0;
+  function segElapsed() { return segStart ? (Date.now() - segStart) / MS_PER_SEC : 0; }
+  function elapsed() { return accum + segElapsed(); }
+
+  Object.defineProperty(v, 'duration',    { get: function () { return DUR; } });
+  Object.defineProperty(v, 'currentTime', { get: function () { return Math.min(DUR, elapsed()); }, set: function () {} });
+  Object.defineProperty(v, 'paused',      { get: function () { return segStart === 0; } });
+  Object.defineProperty(v, 'ended',       { get: function () { return segStart !== 0 && elapsed() >= DUR; } });
+
+  window.__playCalls = 0;
+  window.__tabClicks = 0;
+  v.play  = function () { window.__playCalls++; if (segStart === 0) segStart = Date.now(); return Promise.resolve(); };
+  v.pause = function () { if (segStart !== 0) { accum += segElapsed(); segStart = 0; } };
+
+  document.getElementById('tabs').addEventListener('click', function () { window.__tabClicks++; });
+
+  /* ---------- 视频内弹题模拟（正确答案 = C / value 2） ---------- */
+  var vq = document.getElementById('vq');
+  var CORRECT = '2';
+  window.__quizShown = false;
+  window.__quizSolved = false;
+  window.__quizLog = [];   // 记录每次「提交」时选中的 value
+
+  document.querySelector('#vq .ans-videoquiz-submit').addEventListener('click', function () {
+    if (vq.style.display === 'none') return;           // 已作答成功，忽略重复 click
+    var checked = vq.querySelector('input[name="ans-videoquiz-opt"]:checked');
+    if (!checked) { alert('请选择一个答案'); return; }
+    var val = checked.value;
+    window.__quizLog.push(val);
+    if (val === CORRECT) {
+      vq.style.display = 'none';
+      window.__quizSolved = true;
+      v.play();                                        // 答对 → 恢复播放
+    } else {
+      alert('答案错误，请重试');                        // 答错 → 模拟平台原生 alert
+    }
+  });
+
+  function maybeShowQuiz() {
+    if (!window.__quizShown && !window.__quizSolved && v.currentTime >= 3) {
+      window.__quizShown = true;
+      v.pause();                                       // 弹出弹题时暂停视频
+      vq.style.display = 'block';
+    }
+  }
+
+  window.__state = function () {
+    return {
+      n: n, tab: window.__tab, t: v.currentTime, paused: v.paused, ended: v.ended,
+      playCalls: window.__playCalls, quizShown: window.__quizShown,
+      quizSolved: window.__quizSolved, quizLog: window.__quizLog.slice()
+    };
+  };
+
+  setInterval(function () {
+    maybeShowQuiz();
+    document.getElementById('hud').textContent =
+      'chapter=' + n + '  tab=' + window.__tab + '  t=' + v.currentTime.toFixed(1) + '/' + DUR +
+      '  paused=' + v.paused + '  ended=' + v.ended + '  playCalls=' + window.__playCalls +
+      '  quizShown=' + window.__quizShown + '  quizSolved=' + window.__quizSolved;
+  }, 250);
+</script>
+</body>
+</html>
