@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         超星学习通 · 自动播放 + 播完自动下一节
 // @namespace    workbuddy.chaoxing.autonext
-// @version      1.3.6
+// @version      1.3.7
 // @description  自动播放当前章节的视频；播放完成后自动点击右侧目录的下一节并继续播放。不加速、不绕过平台的防挂机检测（视频内弹出的单选/多选题会自动尝试作答，多选暴力枚举组合）。
 // @author       WorkBuddy
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -30,6 +30,8 @@
  *   脚本会真实点击作答：
  *     - 单选：逐个选项尝试提交，答错（平台弹 alert）就换下一个，直到答对（弹题消失）或试完；
  *     - 多选：暴力枚举所有"选项组合"（2ⁿ−1 种），逐个提交，答错换下一组，直到答对或试完。
+ *   若某次提交后 2.7 秒仍无反馈（没弹"答错"、弹题也没消失），视为未确认，自动换下一组重提交（单选/多选通用）；
+ *   只有把所有组合都试完仍无确定反馈，才停下交你手动。
  *   不伪造、不绕过，纯前端自动点。
  *   多选题组合数过多（默认 > 31 种，约 > 5 个选项）时担心触发平台风控，会停下交给你手动。
  *   填空题不参与自动作答，会停下等你自己做。
@@ -58,6 +60,7 @@
     MUTED: true,          // 默认静音播放（浏览器普遍拦截"带声音的自动播放"，静音才稳；面板可一键切回有声）
     MULTI_CHOICE: true,   // 是否自动答多选题（暴力枚举组合；关闭则多选题停下等手动）
     MULTI_MAX_COMBOS: 31, // 多选题最多尝试的组合数（≈5 个选项上限；超了怕触发风控，改手动）
+    COMBO_RETRY_MS: 2700, // 提交答案后多久没反馈（没弹"答错"、弹题也还在）就视为未确认、自动换下一组重提交（单选/多选通用）
     LOG_MAX: 120,         // 面板最多保留多少行日志
   };
 
@@ -314,12 +317,20 @@
         log(multi
           ? ('弹题：第 ' + st.combIdx + '/' + st.combos.length + ' 种组合答错，换下一种试试')
           : ('弹题：第 ' + st.combIdx + ' 个选项答错，换第 ' + (st.combIdx + 1) + ' 个试试'), 'warn');
-      } else if (Date.now() - st.pendingSince > 8000) {
-        /* 8 秒既没"答错"提示、弹题也还在：属异常情况，交给人工确认，避免乱提交 */
-        st.done = true;
-        setStatus('⏸ 弹题提交后 8 秒无反馈（不确定是否答对），请手动作答确认');
-        log('⏸ 弹题提交后 8 秒无反馈，请你手动作答确认', 'err');
-        return true;
+      } else if (Date.now() - st.pendingSince > CFG.COMBO_RETRY_MS) {
+        /* 超过 COMBO_RETRY_MS 仍无反馈（没收到"答错"alert、弹题也还在）：不定死为"对"，直接换下一组答案重新提交（单选/多选通用） */
+        st.alertBase = q.doc.__cxLastAlert ? q.doc.__cxLastAlert.time : 0;
+        st.combIdx += 1;
+        st.pending = false;
+        if (st.combIdx >= st.combos.length) {
+          st.done = true;
+          setStatus('⏸ 已试完全部 ' + st.combos.length + ' 种组合仍无确定反馈，请手动作答确认');
+          log('⏸ 弹题试完全部组合仍无反馈，请你手动作答确认', 'err');
+          return true;
+        }
+        log(multi
+          ? ('弹题：第 ' + st.combIdx + '/' + st.combos.length + ' 种组合超时无反馈，换下一种重提交')
+          : ('弹题：第 ' + st.combIdx + ' 个选项超时无反馈，换第 ' + (st.combIdx + 1) + ' 个重提交'), 'warn');
       } else {
         /* 还在等反馈，先返回，下一轮再判断 */
         setStatus(multi
