@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         超星学习通 · 自动播放 + 播完自动下一节
 // @namespace    workbuddy.chaoxing.autonext
-// @version      1.3.13
+// @version      1.3.14
 // @description  自动播放当前章节的视频；播放完成后自动点击右侧目录的下一节并继续播放。不加速、不绕过平台的防挂机检测（视频内弹出的单选/多选题会自动尝试作答，多选暴力枚举组合）。
 // @author       WorkBuddy
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -20,8 +20,7 @@
  *          达到门槛（或视频播到结尾）后，**不再按百分比提前跳**，而是轮询等待页面**明确显示本视频"任务已完成/已完成"**这个信号，
  *          出现后才切下一节。这严格对齐平台真实完成态（平台写"90% 完成"只是观看要求，真正记完成要等它显式标记），
  *          也只盯"本视频"的状态、不被整节目录里其它任务点（如考核）干扰。
- *        · 90%：进度 ≥ 90% 直接切下一节。
- *        · 100%：视频必须播到结尾才切。
+ *        · 100%：视频必须播到结尾才直接切（不等平台确认）。
  * 视频仍然按 1 倍速、在前台、真实播放完整时长，不改学习记录。
  * 默认【静音】自动播放（浏览器普遍拦截"带声音的自动播放"，静音才稳；面板右侧 🔇/🔊 可一键切回有声）。
  *
@@ -60,7 +59,7 @@
    * ================================================================ */
   const CFG = {
     POLL_MS: 1500,        // 轮询间隔（毫秒）
-    // 看完阈值改由运行时变量 finishMode 控制（'smart' / 'ratio90' / 'ratio100'），见下方 let finishMode
+    // 看完阈值改由运行时变量 finishMode 控制（'smart' / 'ratio100'），见下方 let finishMode
     SWITCH_DELAY_MS: 2500, // 达到看完阈值后，再等这么久让平台落库/上报，然后切下一节
     COMPLETE_MAXWAIT_MS: 90000, // 智能模式：达观看门槛后，最多等这么久（秒级兜底）让页面标记"任务完成"；超时仍无信号才切走（防卡死，同时提示需校准）
     AUTOSTART: false,     // 打开页面是否自动开始
@@ -78,7 +77,7 @@
   let switching = false;         // 正在切章节，避免重复触发
   let videoTaskThreshold = null;     // 智能模式：从「任务点」面板读到的本视频完成阈值（如 0.90）；null=还没读到
   let videoTaskThresholdTries = 0;   // 已尝试读取阈值的次数（封顶后按 0.999 兜底，避免反复搜）
-  let finishMode = 'smart';      // 看完阈值模式：'smart' 智能（读视频完成阈值）/ 'ratio90'（90% 直接切）/ 'ratio100'（100% 直接切）
+  let finishMode = 'smart';      // 看完阈值模式：'smart' 智能（读视频完成阈值，等页面显式标记完成才切）/ 'ratio100'（100% 直接切）
   let videoCompletedSignaled = false; // 智能模式：本视频是否已检测到"页面明确显示任务完成"信号
   let waitingCompleteSince = 0;   // 智能模式：进入"等页面标记任务完成"状态的起始时间戳（0=还没进）
   let lastKey = '';              // 当前已接管的视频标识
@@ -720,14 +719,12 @@
               fmtTime(v.currentTime) + ' / ' + fmtTime(v.duration) + ')');
 
     /* 切换阈值 / 切换触发逻辑：
-       90% 模式 = 0.90；100% 模式 = 0.999（≈播到结尾）；
+       100% 模式 = 0.999（≈播到结尾，直接切）；
        智能 模式 = 从「任务点」面板读本视频的"观看要求"（如"观看时长 ≥ 总时长 90%"）作为门槛，
                  达到门槛或视频播到结尾后，**不按百分比提前跳**，而是轮询等待页面明确显示
                  "本视频任务已完成/已完成" 这个显式信号，出现才切（严格对齐平台真实完成态）。 */
     let gateThreshold;
-    if (finishMode === 'ratio90') {
-      gateThreshold = 0.90;
-    } else if (finishMode === 'ratio100') {
+    if (finishMode === 'ratio100') {
       gateThreshold = 0.999;
     } else {
       /* 智能：懒读取并缓存本视频的"观看要求"阈值（仅作为进门门槛，不是切的触发器） */
@@ -777,7 +774,7 @@
       return;
     }
 
-    /* 90% / 100% 模式：达到阈值（或 ended）直接切，不等平台确认 */
+    /* 100% 模式：达到阈值（或 ended）直接切，不等平台确认 */
     if (gateReached) {
       const pct = (v.ended ? 100 : ratio * 100).toFixed(1);
       log('✅ 本节已达看完阈值（' + pct + '%），直接切下一节', 'ok');
@@ -817,14 +814,11 @@
     }
     /* 看完阈值按钮高亮（当前选中的那个亮绿，其余白底） */
     const rSmart = panel.querySelector('#cx-ratio-smart');
-    const r90 = panel.querySelector('#cx-ratio-90');
     const r100 = panel.querySelector('#cx-ratio-100');
-    if (rSmart && r90 && r100) {
+    if (rSmart && r100) {
       const ON = '#1a7f37', OFF = '#fff', ONC = '#fff', OFFC = '#333';
       rSmart.style.background = finishMode === 'smart' ? ON : OFF;
       rSmart.style.color = finishMode === 'smart' ? ONC : OFFC;
-      r90.style.background = finishMode === 'ratio90' ? ON : OFF;
-      r90.style.color = finishMode === 'ratio90' ? ONC : OFFC;
       r100.style.background = finishMode === 'ratio100' ? ON : OFF;
       r100.style.color = finishMode === 'ratio100' ? ONC : OFFC;
     }
@@ -886,7 +880,6 @@
       '  <div style="display:flex;align-items:center;gap:6px;margin:0 0 8px;">',
       '    <span style="color:#475467;">看完阈值</span>',
       '    <button id="cx-ratio-smart" style="cursor:pointer;border:1px solid #d0d5dd;border-radius:6px;padding:5px 12px;background:#1a7f37;color:#fff;font-size:12px;">智能</button>',
-      '    <button id="cx-ratio-90" style="cursor:pointer;border:1px solid #d0d5dd;border-radius:6px;padding:5px 12px;background:#fff;color:#333;font-size:12px;">90%</button>',
       '    <button id="cx-ratio-100" style="cursor:pointer;border:1px solid #d0d5dd;border-radius:6px;padding:5px 12px;background:#fff;color:#333;font-size:12px;">100%</button>',
       '  </div>',
       '  <div id="cx-log" style="max-height:150px;overflow-y:auto;border-top:1px solid #eceff3;padding-top:6px;"></div>',
@@ -933,10 +926,9 @@
       renderPanel();
     });
 
-    /* 看完阈值：智能 / 90% / 100% 三选一（互斥）
+    /* 看完阈值：智能 / 100% 二选一（互斥）
        智能 = 读视频旁「任务点」面板的完成条件（如"观看时长≥总时长90%"）作为"看够没"的门槛；达到门槛后不按百分比提前跳，而是等页面明确显示"任务已完成/已完成"才切（严格对齐平台真实完成态，且只看本视频任务点，不等整节里的考核等其它任务点）
-       90%  = 进度≥90% 直接切下一节
-       100% = 视频必须播到结尾才切 */
+       100% = 视频必须播到结尾才直接切（不等平台确认） */
     panel.querySelector('#cx-ratio-smart').addEventListener('click', function () {
       finishMode = 'smart';
       videoTaskThreshold = null;      // 切回智能时重新读阈值
@@ -944,11 +936,6 @@
       videoCompletedSignaled = false;
       waitingCompleteSince = 0;
       log('看完阈值已设为「智能」：看够要求时长后，等页面明确显示"任务已完成"才切下一节', 'ok');
-      renderPanel();
-    });
-    panel.querySelector('#cx-ratio-90').addEventListener('click', function () {
-      finishMode = 'ratio90';
-      log('看完阈值已设为 90%：进度≥90% 直接切下一节（"要求全部看完"的视频可能判未完成）', 'warn');
       renderPanel();
     });
     panel.querySelector('#cx-ratio-100').addEventListener('click', function () {

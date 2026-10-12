@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# 自测（90% 直接切模式）：点「90%」按钮后再开始，验证它直接切、不等任务点完成
+# 自测（100% 直接切模式）：点「100%」按钮后再开始，验证它播到结尾直接切、不等任务点显式完成
 set -e
 
 AB="/c/Users/Eintv631/.workbuddy/binaries/node/workspace/node_modules/agent-browser/bin/agent-browser-win32-x64.exe"
 PY="/c/Users/Eintv631/.workbuddy/binaries/python/versions/3.13.12/python.exe"
 DIR="/c/Users/Eintv631/WorkBuddy/2026-10-11-22-59-44/chaoxing-autoplay"
-PORT=8138
+PORT=8139
 
-"$PY" -m http.server "$PORT" --directory "$DIR" >/tmp/cx_http2.log 2>&1 &
+"$PY" -m http.server "$PORT" --directory "$DIR" >/tmp/cx_http3.log 2>&1 &
 SRV=$!
 sleep 1.5
 
@@ -17,8 +17,8 @@ sleep 1.5
 
 "$AB" wait 2500
 
-# 先切到 90% 模式
-"$AB" eval "var b=document.querySelector('#cx-autonext-panel #cx-ratio-90');if(b){b.click();'ratio90'}else{'NO_BTN'}"
+# 先切到 100% 模式
+"$AB" eval "var b=document.querySelector('#cx-autonext-panel #cx-ratio-100');if(b){b.click();'ratio100'}else{'NO_BTN'}"
 
 # 再点「开始自动」
 "$AB" eval "var b=document.querySelector('#cx-autonext-panel #cx-toggle');if(b){b.click();'started'}else{'NO_PANEL'}"
