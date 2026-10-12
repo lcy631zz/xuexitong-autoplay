@@ -60,6 +60,13 @@
     document.getElementById('iframe').src = 'layer1.html?n=' + (i + 1);
   }
 
+  /* 供 layer2 调用：把"当前激活的目录节点"标记为已完成（模拟超星任务点完成） */
+  window.markActiveComplete = function () {
+    var act = document.querySelector('.posCatalog_select.posCatalog_active') ||
+              document.querySelector('.posCatalog_active');
+    if (act) act.classList.add('complete');
+  };
+
   activate(0);
 </script>
 </body>

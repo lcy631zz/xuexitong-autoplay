@@ -138,6 +138,14 @@
   };
 
   setInterval(function () {
+    /* 视频真正结束后，通知顶层把当前目录节点标记为「已完成」（模拟超星任务点完成） */
+    if (v.ended && !window.__markedComplete) {
+      window.__markedComplete = true;
+      try {
+        var top = window.parent && window.parent.parent;
+        if (top && top.markActiveComplete) top.markActiveComplete();
+      } catch (e) {}
+    }
     maybeShowQuiz();
     document.getElementById('hud').textContent =
       'chapter=' + n + '  tab=' + window.__tab + '  t=' + v.currentTime.toFixed(1) + '/' + DUR +

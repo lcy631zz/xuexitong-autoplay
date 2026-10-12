@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         超星学习通 · 自动播放 + 播完自动下一节
 // @namespace    workbuddy.chaoxing.autonext
-// @version      1.3.7
+// @version      1.3.8
 // @description  自动播放当前章节的视频；播放完成后自动点击右侧目录的下一节并继续播放。不加速、不绕过平台的防挂机检测（视频内弹出的单选/多选题会自动尝试作答，多选暴力枚举组合）。
 // @author       WorkBuddy
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -15,7 +15,8 @@
  * ---------------------------------------------------------------
  * 本脚本只做两件"免手动操作"的事：
  *   1) 进入某节后，自动点一下播放键（你本来也要点的）；
- *   2) 当前视频播到"进度 ≥ 设定阈值（默认 90%，面板可切 100%）或播放结束 ended"后，自动点右侧目录的下一节。
+ *   2) 当前视频播到"进度 ≥ 设定阈值（默认 90%，面板可切 100%）或播放结束 ended"后，不直接跳；
+ *      而是轮询右侧目录，等本节的"任务点"被平台标记为「完成」才自动点下一节（最多等 20 秒，超时兜底切走，避免卡死）。
  * 视频仍然按 1 倍速、在前台、真实播放完整时长，不改学习记录。
  * 默认【静音】自动播放（浏览器普遍拦截"带声音的自动播放"，静音才稳；面板右侧 🔇/🔊 可一键切回有声）。
  *
@@ -54,8 +55,9 @@
    * ================================================================ */
   const CFG = {
     POLL_MS: 1500,        // 轮询间隔（毫秒）
-    FINISH_RATIO: 0.90,   // 看完阈值（面板可切 90%/100%）：进度 ≥ 此值（或视频 ended）即判定播完并切下一节。100% 模式需视频真正播到结尾，满足"要求全部看完"
-    NEXT_WAIT_MS: 6000,   // 判定播完后等多久再切下一节（给平台上报 100% 进度留时间，避免任务点没记上就跳走了）
+    FINISH_RATIO: 0.90,   // 看完阈值（面板可切 90%/100%）：进度 ≥ 此值（或视频 ended）才开始等待"任务点完成"。100% 模式需视频真正播到结尾，满足"要求全部看完"
+    TASK_DONE_MAXWAIT_MS: 20000, // 视频播到结尾后，最多等多久等右侧目录任务点标记"完成"再跳；超时仍没确认就按安全兜底切走（避免卡死）
+    SWITCH_DELAY_MS: 2500, // 确认任务点完成后，再等这么久让平台落库，然后切下一节
     AUTOSTART: false,     // 打开页面是否自动开始
     MUTED: true,          // 默认静音播放（浏览器普遍拦截"带声音的自动播放"，静音才稳；面板可一键切回有声）
     MULTI_CHOICE: true,   // 是否自动答多选题（暴力枚举组合；关闭则多选题停下等手动）
@@ -69,6 +71,8 @@
    * ================================================================ */
   let running = CFG.AUTOSTART;   // 总开关
   let switching = false;         // 正在切章节，避免重复触发
+  let completing = false;        // 已播到结尾、正在等右侧目录任务点标记"完成"
+  let completingSince = 0;       // 进入 completing 的时间
   let lastKey = '';              // 当前已接管的视频标识
   let lastTabTryAt = 0;          // 上次尝试点「视频」标签的时间
   let tabMissLogged = false;     // 「本节没有视频标签」只提醒一次
@@ -544,6 +548,60 @@
     return true;
   }
 
+  /* 收集一个节点自身 + 后代元素的所有 class（用于判断任务点完成态） */
+  function nodeClasses(node) {
+    if (!node) return '';
+    let s = node.className || '';
+    let els = [];
+    try { els = node.querySelectorAll('*'); } catch (e) {}
+    for (let i = 0; i < els.length; i++) {
+      if (els[i].className && typeof els[i].className === 'string') s += ' ' + els[i].className;
+    }
+    return s;
+  }
+
+  /* 判断"当前正在播放的这一节"在右侧目录里的任务点是否已标记为完成。
+     超星完成任务点后，目录节点通常会：① 节点或其图标加上 completed/finish/over 之类 class；② 出现 ✓/✔ 对勾。
+     用多模式兜底检测；若你的超星版本 class 不同（脚本日志里会打印当前节点 class），把那行发我即可校准。 */
+  function isActiveTaskDone() {
+    const nodes = catalogNodes();
+    const idx = activeIndex(nodes);
+    if (idx < 0) return false;
+    const node = nodes[idx];
+    const cls = nodeClasses(node);
+    if (/(?:^|\s)(?:complete|completed|finish|finished|over|done|learned|studied|gray|finishtask|taskdone|pass|answered)(?:$|\s)/i.test(cls)) return true;
+    if (/[✓✔√]/.test(node.textContent || '')) return true;
+    return false;
+  }
+
+  /* 执行"切下一节"：先等 SWITCH_DELAY_MS 让平台落库，再 goNext */
+  function doSwitch() {
+    switching = true;
+    completing = false;
+    setTimeout(function () {
+      const ok = goNext();
+      lastKey = '';
+      tabMissLogged = false;
+      lastTabTryAt = 0;
+      setTimeout(function () { switching = false; }, ok ? 4000 : 1200);
+    }, CFG.SWITCH_DELAY_MS);
+  }
+
+  /* 已播到结尾：轮询右侧目录任务点是否"完成"，完成才切；超时兜底切走（不卡死） */
+  function handleCompleting() {
+    if (isActiveTaskDone()) {
+      log('✅ 目录任务点已标记完成，切下一节', 'ok');
+      doSwitch();
+      return;
+    }
+    if (Date.now() - completingSince > CFG.TASK_DONE_MAXWAIT_MS) {
+      log('⚠ 等 ' + (CFG.TASK_DONE_MAXWAIT_MS / 1000) + ' 秒仍未能从目录确认任务点完成（可能选择器不匹配你的超星版本），按安全兜底切下一节', 'warn');
+      doSwitch();
+      return;
+    }
+    setStatus('已播到结尾，等待目录任务点标记"完成"后切下一节…');
+  }
+
   /* ================================================================
    * 6. 主循环
    * ================================================================ */
@@ -559,6 +617,8 @@
       topDoc().documentElement.appendChild(panel);
     }
     if (!running || switching) return;
+    /* 已播到结尾、正在等目录任务点标记"完成"：交给 handleCompleting 轮询，不再走下面的播放入口 */
+    if (completing) { handleCompleting(); return; }
 
     /* 视频内弹题优先处理：单选/多选自动作答（多选枚举组合）；无弹题则往下走 */
     if (findQuiz()) {
@@ -590,6 +650,7 @@
     /* 发现新视频：接管并播放 */
     if (key !== lastKey) {
       lastKey = key;
+      completing = false;
       tabMissLogged = false;
       setStatus('已接管新视频，准备播放…');
       log('🎬 检测到视频：' + shortName(key) + '（时长 ' + fmtTime(v.duration) + '）');
@@ -614,20 +675,24 @@
       setStatus('播放中 ' + (ratio * 100).toFixed(1) + '%  (' +
                 fmtTime(v.currentTime) + ' / ' + fmtTime(v.duration) + ')');
 
-      /* 完成判定：进度 ≥ CFG.FINISH_RATIO（面板可选 90% 或 100%）或视频 ended 即切下一节。
-         100% 模式需视频真正播到结尾（满足"要求全部看完"）；90% 模式会提前跳，部分视频任务点可能仍判未完成 */
+      /* 完成判定：进度 ≥ CFG.FINISH_RATIO（面板可选 90% 或 100%）或视频 ended 后，
+         不再立刻跳——进入"等目录任务点标记完成"状态，由 handleCompleting 轮询确认完成才切。
+         100% 模式需视频真正播到结尾（满足"要求全部看完"）；90% 模式会较早进入等待，但最终仍以平台"任务点完成"为准 */
       if (v.ended || ratio >= CFG.FINISH_RATIO) {
-        switching = true;
-        const pct = (ratio * 100).toFixed(1);
-        log('✅ 本节已播到结尾（' + pct + '%），等待平台记录 100% 后切下一节…', 'ok');
-        setStatus('本节完成，准备切下一节…');
-        setTimeout(function () {
-          const ok = goNext();
-          lastKey = '';
-          tabMissLogged = false;
-          lastTabTryAt = 0;
-          setTimeout(function () { switching = false; }, ok ? 4000 : 1200);
-        }, CFG.NEXT_WAIT_MS);
+        if (!completing) {
+          completing = true;
+          completingSince = Date.now();
+          const pct = (ratio * 100).toFixed(1);
+          log('✅ 本节已播到结尾（' + pct + '%），开始等待右侧目录任务点标记"完成"…', 'ok');
+          /* 打印当前目录节点的 class，便于校准"完成态"选择器（若检测不生效，把这两行发我） */
+          const ns = catalogNodes();
+          const ai = activeIndex(ns);
+          if (ai >= 0) {
+            log('ℹ 目录节点 class：[' + (ns[ai].className || '') + ']，文本前 20 字：' +
+                (ns[ai].textContent || '').replace(/\s+/g, ' ').trim().slice(0, 20), 'info');
+          }
+        }
+        return; /* 交给 handleCompleting 轮询 */
       }
     }
   }
@@ -743,6 +808,7 @@
       if (running) {
         lastKey = '';
         switching = false;
+        completing = false;
         tabMissLogged = false;
         lastTabTryAt = 0;
         statusText = '已启动，正在寻找视频…';
