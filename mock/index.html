@@ -22,6 +22,11 @@
   <div id="right">
     <h3>目录</h3>
     <div id="cat"></div>
+    <!-- 回归测试用：模拟"课程里其它已经看完的章节"——页面上存在"已完成"文本。
+         脚本的智能检测必须**忽略**它（只看当前视频任务点面板），否则会"当前视频没完成就提前切"。 -->
+    <div id="other-completed" style="margin-top:10px;padding:6px 8px;background:#f6fff8;color:#1a7f37;border-radius:6px;">
+      1.0 已学过的章节 · 已完成
+    </div>
   </div>
 
 <script>

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         超星学习通 · 自动播放 + 播完自动下一节
 // @namespace    workbuddy.chaoxing.autonext
-// @version      1.3.14
+// @version      1.3.15
 // @description  自动播放当前章节的视频；播放完成后自动点击右侧目录的下一节并继续播放。不加速、不绕过平台的防挂机检测（视频内弹出的单选/多选题会自动尝试作答，多选暴力枚举组合）。
 // @author       WorkBuddy
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -567,10 +567,11 @@
     return s;
   }
 
-  /* 从视频旁的「任务点」面板读取本视频的完成条件，返回阈值比例（如 0.90）；读不到返回 null。
-     面板文案形如："任务点 / 完成条件 / 观看时长需 ≥ 总时长的 90%"。
-     用文本匹配（不依赖具体 class 名），并取"文本最短"的那个元素（最贴近面板本身，避开外层容器）。 */
-  function readVideoTaskThreshold() {
+  /* 定位"当前视频的任务点面板"：返回页面里含"完成条件"/"观看时长"且文本最短的元素
+     （最贴近本视频任务点本身，避开外层容器）。
+     这是"读观看要求阈值"与"检测本视频完成"的共同锚点——只在本视频任务点范围内判断，
+     避免被页面里其它已看完章节的"已完成"干扰（否则会出现"当前视频没完成就提前切"）。 */
+  function findCurrentTaskPointEl() {
     const docs = collectDocs();
     let best = null;
     for (let i = 0; i < docs.length; i++) {
@@ -579,57 +580,65 @@
       for (let j = 0; j < els.length; j++) {
         const t = els[j].textContent || '';
         if (t.indexOf('观看时长') === -1 && t.indexOf('完成条件') === -1) continue;
-        const m = t.match(/总时长[^0-9]{0,8}(\d{1,3})\s*%/);
-        if (m) {
-          const pct = parseInt(m[1], 10);
-          if (pct >= 1 && pct <= 100 && (!best || t.length < best.len)) {
-            best = { pct: pct / 100, len: t.length };
-          }
-        }
+        if (!best || t.length < best.len) best = { el: els[j], len: t.length };
       }
     }
-    return best ? best.pct : null;
+    return best ? best.el : null;
   }
 
-  /* 智能模式：检测"页面是否已明确显示本视频任务点完成"。
-     平台说"观看时长 ≥ 总时长 90% 完成"只是观看要求，真正记完成要等它**显式标记**；
-     所以我们不靠百分比，而是轮询这个显式信号。
+  /* 从视频旁的「任务点」面板读取本视频的完成条件，返回阈值比例（如 0.90）；读不到返回 null。
+     面板文案形如："任务点 / 完成条件 / 观看时长需 ≥ 总时长的 90%"。 */
+  function readVideoTaskThreshold() {
+    const el = findCurrentTaskPointEl();
+    if (!el) return null;
+    const t = el.textContent || '';
+    const m = t.match(/总时长[^0-9]{0,8}(\d{1,3})\s*%/);
+    if (m) {
+      const pct = parseInt(m[1], 10);
+      if (pct >= 1 && pct <= 100) return pct / 100;
+    }
+    return null;
+  }
+
+  /* 智能模式：检测"页面是否已明确显示【本视频】任务点完成"。
+     关键：必须限定在"当前这个视频的任务点"范围内，不能搜整个页面——
+     页面里其它已看完的章节 / 课程也会显示"已完成"，若不限范围会把那些也算进来，导致"当前视频还没完成就提前切"。
+     做法：先定位当前视频的「任务点」面板（findCurrentTaskPointEl），再从该元素向上逐层搜索，
+          但**子树文本一旦超过 400 字就停止上溯**——只覆盖本视频任务点那一小块（要求文案 + 状态徽标），
+          不爬进包含右侧目录 / 其它已看完章节的大容器（那里也有"已完成"，否则会误判提前切）。
      判定（基于文本，不依赖固定 class）：
        正向完成文案：已完成 / 任务完成 / 已学完 / 学习完成 / 已看完 / 已经完成 / 完成✔ / 完成✓
        排除"未完成"（"未完成任务点前…"这种提示不是完成态）。
      注：不把"完成条件"当完成信号——那是静态的"要求文案"，一直都在，不代表已完成。 */
   function detectVideoTaskCompleted() {
-    const docs = collectDocs();
+    const anchor = findCurrentTaskPointEl();
+    if (!anchor) return false;
     const DONE = /(已完成|任务完成|已学完|学习完成|已看完|已经完成|完成✔|完成✓)/;
     const NOTDONE = /(未完成)/;
-    for (let i = 0; i < docs.length; i++) {
-      let els;
-      try { els = docs[i].querySelectorAll('*'); } catch (e) { continue; }
-      for (let j = 0; j < els.length; j++) {
-        const t = (els[j].textContent || '').trim();
-        if (t && DONE.test(t) && !NOTDONE.test(t)) return true;
+    /* 从锚点向上逐层搜索，但**一旦某层子树文本过长就停止上溯**——
+       这样只覆盖"本视频任务点那一小块"（要求文案 + 状态徽标，通常几十字），
+       不会爬到包含右侧目录/其它已看完章节的大容器（那里也有"已完成"，会误判提前切）。 */
+    let node = anchor;
+    for (let lvl = 0; lvl < 8 && node; lvl++) {
+      const txt = (node.textContent || '').trim();
+      if (txt.length > 400) break;   // 容器过大 → 已跑到整页/含目录，停止，避免把别的"已完成"算进来
+      if (txt && DONE.test(txt) && !NOTDONE.test(txt)) {
+        try { window.__cxDoneMatch = (node.outerHTML || txt).replace(/\s+/g, ' ').slice(0, 400); } catch (e) {}
+        return true;
       }
+      node = node.parentElement;
     }
     return false;
   }
 
-  /* 诊断：抓取「任务点」面板/元素的 HTML 节选，用于校准 detectVideoTaskCompleted 的完成态信号。
-     仅在进入"等待完成"状态 / 超时时打印，方便你无需手动 F12 就能把真实 DOM 发我校准。 */
+  /* 诊断：抓取当前视频「任务点」面板的 HTML 节选，用于校准 / 排查。
+     仅在进入"等待完成"状态、超时时、以及命中完成时打印，方便你无需手动 F12 就把真实 DOM 发我校准。 */
   function diagTaskPointHTML() {
-    const docs = collectDocs();
-    for (let i = 0; i < docs.length; i++) {
-      let els;
-      try { els = docs[i].querySelectorAll('*'); } catch (e) { continue; }
-      for (let j = 0; j < els.length; j++) {
-        const t = (els[j].textContent || '');
-        if (t.indexOf('任务点') !== -1 || t.indexOf('完成条件') !== -1 || t.indexOf('观看时长') !== -1) {
-          let s = '';
-          try { s = els[j].outerHTML; } catch (e) { s = els[j].textContent || ''; }
-          return (s || '').replace(/\s+/g, ' ').slice(0, 500);
-        }
-      }
-    }
-    return '';
+    const el = findCurrentTaskPointEl();
+    if (!el) return '(未找到当前视频任务点面板：页面里没有含"完成条件/观看时长"的元素)';
+    let s = '';
+    try { s = el.outerHTML; } catch (e) { s = el.textContent || ''; }
+    return (s || '').replace(/\s+/g, ' ').slice(0, 500);
   }
 
   /* 执行"切下一节"：先等 SWITCH_DELAY_MS 让平台落库，再 goNext */
@@ -748,7 +757,9 @@
       if (detectVideoTaskCompleted()) {
         if (!videoCompletedSignaled) {
           videoCompletedSignaled = true;
-          log('✅ 页面明确显示本视频「任务已完成」，切下一节', 'ok');
+          const m = (typeof window.__cxDoneMatch === 'string' && window.__cxDoneMatch)
+            ? '（匹配元素：' + window.__cxDoneMatch + '）' : '';
+          log('✅ 页面明确显示本视频「任务已完成」，切下一节' + m, 'ok');
         }
         doSwitch();
         return;
