@@ -142,10 +142,13 @@
   };
 
   setInterval(function () {
-    /* 视频真正结束后，通知顶层把当前目录节点标记为「已完成」（模拟超星任务点完成） */
+    /* 视频真正结束后：① 把「任务点」面板文案翻成"已完成"（模拟超星显式标记本视频任务完成）；
+       ② 通知顶层把当前目录节点标记为「已完成」。脚本智能模式应据此信号才切下一节。 */
     if (v.ended && !window.__markedComplete) {
       window.__markedComplete = true;
       try {
+        var p = document.getElementById('taskpoint-panel');
+        if (p) p.innerHTML = '任务点 <span style="color:#1a7f37;">●</span> 已完成（观看时长已达标，本视频任务点完成）';
         var top = window.parent && window.parent.parent;
         if (top && top.markActiveComplete) top.markActiveComplete();
       } catch (e) {}
