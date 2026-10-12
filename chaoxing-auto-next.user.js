@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         超星学习通 · 自动播放 + 播完自动下一节
 // @namespace    workbuddy.chaoxing.autonext
-// @version      1.3.9
+// @version      1.3.10
 // @description  自动播放当前章节的视频；播放完成后自动点击右侧目录的下一节并继续播放。不加速、不绕过平台的防挂机检测（视频内弹出的单选/多选题会自动尝试作答，多选暴力枚举组合）。
 // @author       WorkBuddy
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -601,6 +601,13 @@
       return;
     }
     if (Date.now() - completingSince > CFG.TASK_DONE_MAXWAIT_MS) {
+      /* 兜底切换前，再打一次当前目录节点状态，便于校准：若你这版超星完成任务点的"标记"长这样，把这段发我即可 */
+      const ns = catalogNodes();
+      const ai = activeIndex(ns);
+      if (ai >= 0) {
+        log('ℹ 超时兜底时节点 class：[' + (ns[ai].className || '') + ']，HTML(节选)：' +
+            ((ns[ai].outerHTML || '').replace(/\s+/g, ' ').trim().slice(0, 400)), 'warn');
+      }
       log('⚠ 等 ' + (CFG.TASK_DONE_MAXWAIT_MS / 1000) + ' 秒仍未能从目录确认任务点完成（可能选择器不匹配你的超星版本），按安全兜底切下一节', 'warn');
       doSwitch();
       return;
@@ -693,12 +700,14 @@
           completing = true;
           completingSince = Date.now();
           log('✅ 本节已播到结尾（' + pct + '%），开始等待右侧目录任务点标记"完成"…', 'ok');
-          /* 打印当前目录节点的 class，便于校准"完成态"选择器（若检测不生效，把这两行发我） */
+          /* 打印当前目录节点的 class + HTML 节选，便于校准"完成态"选择器（若检测不生效，把这几行发我即可） */
           const ns = catalogNodes();
           const ai = activeIndex(ns);
           if (ai >= 0) {
-            log('ℹ 目录节点 class：[' + (ns[ai].className || '') + ']，文本前 20 字：' +
-                (ns[ai].textContent || '').replace(/\s+/g, ' ').trim().slice(0, 20), 'info');
+            const nd = ns[ai];
+            log('ℹ 目录节点 class：[' + (nd.className || '') + ']，文本前 20 字：' +
+                (nd.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 20), 'info');
+            log('ℹ 目录节点 HTML(节选)：' + ((nd.outerHTML || '').replace(/\s+/g, ' ').trim().slice(0, 400)), 'info');
           }
         }
         return; /* 交给 handleCompleting 轮询 */
