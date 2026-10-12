@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         超星学习通 · 自动播放 + 播完自动下一节
 // @namespace    workbuddy.chaoxing.autonext
-// @version      1.3.10
+// @version      1.3.11
 // @description  自动播放当前章节的视频；播放完成后自动点击右侧目录的下一节并继续播放。不加速、不绕过平台的防挂机检测（视频内弹出的单选/多选题会自动尝试作答，多选暴力枚举组合）。
 // @author       WorkBuddy
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -573,8 +573,21 @@
     if (idx < 0) return false;
     const node = nodes[idx];
     const cls = nodeClasses(node);
+    /* ① 超星真实信号（最权威）：目录节点内隐藏字段 jobUnfinishCount 表示"本节未完成任务点数"。
+       value="0"（或该字段不存在）视为本节任务点已全部完成；value>0 表示还有未完成的，明确不算完成。
+       例：未完成时 <input type="hidden" value="1" class="jobUnfinishCount"> 且文本"1个待完成任务点"；
+           完成时 value="0" 且文本"0个待完成任务点"。 */
+    const unfinish = (node.querySelector && node.querySelector('input.jobUnfinishCount')) || null;
+    if (unfinish) {
+      const v = (unfinish.value || '').trim();
+      if (v === '0') return true;                                  // 全部完成
+      if (v !== '' && parseInt(v, 10) > 0) return false;            // 明确还有未完成的 → 直接判定未完成（不靠猜）
+    }
+    /* ② 兜底：节点/后代出现完成态 class 或对勾（兼容部分超星版本 / 旧版 mock） */
     if (/(?:^|\s)(?:complete|completed|finish|finished|over|done|learned|studied|gray|finishtask|taskdone|pass|answered)(?:$|\s)/i.test(cls)) return true;
     if (/[✓✔√]/.test(node.textContent || '')) return true;
+    /* ③ 文本信号：出现"0个待完成任务点"也视为完成 */
+    if (/0个待完成任务点/.test(node.textContent || '')) return true;
     return false;
   }
 
