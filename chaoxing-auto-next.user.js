@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         超星学习通 · 自动播放 + 播完自动下一节
 // @namespace    workbuddy.chaoxing.autonext
-// @version      1.3.11
+// @version      1.3.12
 // @description  自动播放当前章节的视频；播放完成后自动点击右侧目录的下一节并继续播放。不加速、不绕过平台的防挂机检测（视频内弹出的单选/多选题会自动尝试作答，多选暴力枚举组合）。
 // @author       WorkBuddy
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -16,10 +16,11 @@
  * 本脚本只做两件"免手动操作"的事：
  *   1) 进入某节后，自动点一下播放键（你本来也要点的）；
  *   2) 看完阈值三种模式（面板可切换，默认"智能"）：
- *        · 智能（默认）：视频播到结尾后，轮询右侧目录，等本节的"任务点"被平台标记为「完成」才自动点下一节
- *          （最多等 20 秒，超时兜底切走，避免卡死）。能自动适配"要求全部看完"的视频。
- *        · 90%：进度 ≥ 90% 直接切下一节（不等任务点完成；"要求全部看完"的视频可能判未完成）。
- *        · 100%：视频必须播到结尾才切（满足"要求全部看完"，但不等平台确认）。
+ *        · 智能（默认）：从视频旁的「任务点」面板读取本视频的完成条件（如"观看时长需 ≥ 总时长的 90%"），
+ *          看够这个比例就切下一节——自动适配 90% 与"要求全部看完"(≈100%) 两类视频。
+ *          注意：它只判断"本视频"看没看够，不等整节目录里其它任务点（如考核）完成（那一栏看视频永远清不了零）。
+ *        · 90%：进度 ≥ 90% 直接切下一节。
+ *        · 100%：视频必须播到结尾才切。
  * 视频仍然按 1 倍速、在前台、真实播放完整时长，不改学习记录。
  * 默认【静音】自动播放（浏览器普遍拦截"带声音的自动播放"，静音才稳；面板右侧 🔇/🔊 可一键切回有声）。
  *
@@ -59,8 +60,7 @@
   const CFG = {
     POLL_MS: 1500,        // 轮询间隔（毫秒）
     // 看完阈值改由运行时变量 finishMode 控制（'smart' / 'ratio90' / 'ratio100'），见下方 let finishMode
-    TASK_DONE_MAXWAIT_MS: 20000, // 视频播到结尾后，最多等多久等右侧目录任务点标记"完成"再跳；超时仍没确认就按安全兜底切走（避免卡死）
-    SWITCH_DELAY_MS: 2500, // 确认任务点完成后，再等这么久让平台落库，然后切下一节
+    SWITCH_DELAY_MS: 2500, // 达到看完阈值后，再等这么久让平台落库/上报，然后切下一节
     AUTOSTART: false,     // 打开页面是否自动开始
     MUTED: true,          // 默认静音播放（浏览器普遍拦截"带声音的自动播放"，静音才稳；面板可一键切回有声）
     MULTI_CHOICE: true,   // 是否自动答多选题（暴力枚举组合；关闭则多选题停下等手动）
@@ -74,9 +74,9 @@
    * ================================================================ */
   let running = CFG.AUTOSTART;   // 总开关
   let switching = false;         // 正在切章节，避免重复触发
-  let completing = false;        // 已播到结尾、正在等右侧目录任务点标记"完成"
-  let completingSince = 0;       // 进入 completing 的时间
-  let finishMode = 'smart';      // 看完阈值模式：'smart' 智能（播到结尾等任务点完成）/ 'ratio90'（90% 直接切）/ 'ratio100'（100% 直接切）
+  let videoTaskThreshold = null;     // 智能模式：从「任务点」面板读到的本视频完成阈值（如 0.90）；null=还没读到
+  let videoTaskThresholdTries = 0;   // 已尝试读取阈值的次数（封顶后按 0.999 兜底，避免反复搜）
+  let finishMode = 'smart';      // 看完阈值模式：'smart' 智能（读视频完成阈值）/ 'ratio90'（90% 直接切）/ 'ratio100'（100% 直接切）
   let lastKey = '';              // 当前已接管的视频标识
   let lastTabTryAt = 0;          // 上次尝试点「视频」标签的时间
   let tabMissLogged = false;     // 「本节没有视频标签」只提醒一次
@@ -564,37 +564,33 @@
     return s;
   }
 
-  /* 判断"当前正在播放的这一节"在右侧目录里的任务点是否已标记为完成。
-     超星完成任务点后，目录节点通常会：① 节点或其图标加上 completed/finish/over 之类 class；② 出现 ✓/✔ 对勾。
-     用多模式兜底检测；若你的超星版本 class 不同（脚本日志里会打印当前节点 class），把那行发我即可校准。 */
-  function isActiveTaskDone() {
-    const nodes = catalogNodes();
-    const idx = activeIndex(nodes);
-    if (idx < 0) return false;
-    const node = nodes[idx];
-    const cls = nodeClasses(node);
-    /* ① 超星真实信号（最权威）：目录节点内隐藏字段 jobUnfinishCount 表示"本节未完成任务点数"。
-       value="0"（或该字段不存在）视为本节任务点已全部完成；value>0 表示还有未完成的，明确不算完成。
-       例：未完成时 <input type="hidden" value="1" class="jobUnfinishCount"> 且文本"1个待完成任务点"；
-           完成时 value="0" 且文本"0个待完成任务点"。 */
-    const unfinish = (node.querySelector && node.querySelector('input.jobUnfinishCount')) || null;
-    if (unfinish) {
-      const v = (unfinish.value || '').trim();
-      if (v === '0') return true;                                  // 全部完成
-      if (v !== '' && parseInt(v, 10) > 0) return false;            // 明确还有未完成的 → 直接判定未完成（不靠猜）
+  /* 从视频旁的「任务点」面板读取本视频的完成条件，返回阈值比例（如 0.90）；读不到返回 null。
+     面板文案形如："任务点 / 完成条件 / 观看时长需 ≥ 总时长的 90%"。
+     用文本匹配（不依赖具体 class 名），并取"文本最短"的那个元素（最贴近面板本身，避开外层容器）。 */
+  function readVideoTaskThreshold() {
+    const docs = collectDocs();
+    let best = null;
+    for (let i = 0; i < docs.length; i++) {
+      let els;
+      try { els = docs[i].querySelectorAll('*'); } catch (e) { continue; }
+      for (let j = 0; j < els.length; j++) {
+        const t = els[j].textContent || '';
+        if (t.indexOf('观看时长') === -1 && t.indexOf('完成条件') === -1) continue;
+        const m = t.match(/总时长[^0-9]{0,8}(\d{1,3})\s*%/);
+        if (m) {
+          const pct = parseInt(m[1], 10);
+          if (pct >= 1 && pct <= 100 && (!best || t.length < best.len)) {
+            best = { pct: pct / 100, len: t.length };
+          }
+        }
+      }
     }
-    /* ② 兜底：节点/后代出现完成态 class 或对勾（兼容部分超星版本 / 旧版 mock） */
-    if (/(?:^|\s)(?:complete|completed|finish|finished|over|done|learned|studied|gray|finishtask|taskdone|pass|answered)(?:$|\s)/i.test(cls)) return true;
-    if (/[✓✔√]/.test(node.textContent || '')) return true;
-    /* ③ 文本信号：出现"0个待完成任务点"也视为完成 */
-    if (/0个待完成任务点/.test(node.textContent || '')) return true;
-    return false;
+    return best ? best.pct : null;
   }
 
   /* 执行"切下一节"：先等 SWITCH_DELAY_MS 让平台落库，再 goNext */
   function doSwitch() {
     switching = true;
-    completing = false;
     setTimeout(function () {
       const ok = goNext();
       lastKey = '';
@@ -602,30 +598,6 @@
       lastTabTryAt = 0;
       setTimeout(function () { switching = false; }, ok ? 4000 : 1200);
     }, CFG.SWITCH_DELAY_MS);
-  }
-
-  /* 已播到结尾：轮询右侧目录任务点是否"完成"，完成才切；超时兜底切走（不卡死）。
-     若中途切到非智能模式，则不再等待、直接切。 */
-  function handleCompleting() {
-    if (finishMode !== 'smart') { doSwitch(); return; }
-    if (isActiveTaskDone()) {
-      log('✅ 目录任务点已标记完成，切下一节', 'ok');
-      doSwitch();
-      return;
-    }
-    if (Date.now() - completingSince > CFG.TASK_DONE_MAXWAIT_MS) {
-      /* 兜底切换前，再打一次当前目录节点状态，便于校准：若你这版超星完成任务点的"标记"长这样，把这段发我即可 */
-      const ns = catalogNodes();
-      const ai = activeIndex(ns);
-      if (ai >= 0) {
-        log('ℹ 超时兜底时节点 class：[' + (ns[ai].className || '') + ']，HTML(节选)：' +
-            ((ns[ai].outerHTML || '').replace(/\s+/g, ' ').trim().slice(0, 400)), 'warn');
-      }
-      log('⚠ 等 ' + (CFG.TASK_DONE_MAXWAIT_MS / 1000) + ' 秒仍未能从目录确认任务点完成（可能选择器不匹配你的超星版本），按安全兜底切下一节', 'warn');
-      doSwitch();
-      return;
-    }
-    setStatus('已播到结尾，等待目录任务点标记"完成"后切下一节…');
   }
 
   /* ================================================================
@@ -643,8 +615,6 @@
       topDoc().documentElement.appendChild(panel);
     }
     if (!running || switching) return;
-    /* 已播到结尾、正在等目录任务点标记"完成"：交给 handleCompleting 轮询，不再走下面的播放入口 */
-    if (completing) { handleCompleting(); return; }
 
     /* 视频内弹题优先处理：单选/多选自动作答（多选枚举组合）；无弹题则往下走 */
     if (findQuiz()) {
@@ -676,7 +646,8 @@
     /* 发现新视频：接管并播放 */
     if (key !== lastKey) {
       lastKey = key;
-      completing = false;
+      videoTaskThreshold = null;        // 新视频：清掉上一个视频缓存的任务点阈值
+      videoTaskThresholdTries = 0;
       tabMissLogged = false;
       setStatus('已接管新视频，准备播放…');
       log('🎬 检测到视频：' + shortName(key) + '（时长 ' + fmtTime(v.duration) + '）');
@@ -701,35 +672,40 @@
     setStatus('播放中 ' + (ratio * 100).toFixed(1) + '%  (' +
               fmtTime(v.currentTime) + ' / ' + fmtTime(v.duration) + ')');
 
-    /* 切换阈值：智能 / 100% 模式都需播到结尾(≈100%)，90% 模式为 0.90；视频 ended 直接算达标 */
-    const switchThreshold = (finishMode === 'ratio90') ? 0.90 : 0.999;
+    /* 切换阈值：
+       90% 模式 = 0.90；100% 模式 = 0.999；
+       智能 模式 = 从视频旁「任务点」面板读本视频的完成条件（如"观看时长需 ≥ 总时长的 90%"），
+                读不到就保守按 0.999（≈播到结尾）。视频 ended 一律算达标。 */
+    let switchThreshold;
+    if (finishMode === 'ratio90') {
+      switchThreshold = 0.90;
+    } else if (finishMode === 'ratio100') {
+      switchThreshold = 0.999;
+    } else {
+      /* 智能：懒读取并缓存本视频的任务点完成阈值 */
+      if (videoTaskThreshold == null) {
+        videoTaskThreshold = readVideoTaskThreshold();
+        videoTaskThresholdTries += 1;
+        if (videoTaskThreshold == null && videoTaskThresholdTries >= 30) {
+          videoTaskThreshold = 0.999; /* 读不到就按接近结尾兜底，不再反复搜 */
+        }
+      }
+      switchThreshold = (videoTaskThreshold != null) ? videoTaskThreshold : 0.999;
+    }
     const reached = v.ended || ratio >= switchThreshold;
 
     if (reached) {
       const pct = (v.ended ? 100 : ratio * 100).toFixed(1);
+      const need = Math.round(switchThreshold * 100);
       if (finishMode === 'smart') {
-        /* 智能模式：进入"等目录任务点标记完成"流程（handleCompleting 轮询确认才切，最多等 20 秒兜底） */
-        if (!completing) {
-          completing = true;
-          completingSince = Date.now();
-          log('✅ 本节已播到结尾（' + pct + '%），开始等待右侧目录任务点标记"完成"…', 'ok');
-          /* 打印当前目录节点的 class + HTML 节选，便于校准"完成态"选择器（若检测不生效，把这几行发我即可） */
-          const ns = catalogNodes();
-          const ai = activeIndex(ns);
-          if (ai >= 0) {
-            const nd = ns[ai];
-            log('ℹ 目录节点 class：[' + (nd.className || '') + ']，文本前 20 字：' +
-                (nd.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 20), 'info');
-            log('ℹ 目录节点 HTML(节选)：' + ((nd.outerHTML || '').replace(/\s+/g, ' ').trim().slice(0, 400)), 'info');
-          }
-        }
-        return; /* 交给 handleCompleting 轮询 */
+        /* 智能：本视频已看够平台要求的时长（如 ≥90%）即视为"本视频任务点完成"，直接切下一节。
+           不再等"整节目录未完成数清零"——那一栏还含考核等其它任务点，只看视频永远清不了零。 */
+        log('✅ 视频任务点已完成（已看 ' + pct + '% ≥ 需 ' + need + '%），切下一节', 'ok');
       } else {
-        /* 90% / 100% 模式：直接切下一节（不等任务点完成） */
         log('✅ 本节已达看完阈值（' + pct + '%），直接切下一节', 'ok');
-        doSwitch();
-        return;
       }
+      doSwitch();
+      return;
     }
   }
 
@@ -848,7 +824,8 @@
       if (running) {
         lastKey = '';
         switching = false;
-        completing = false;
+        videoTaskThreshold = null;
+        videoTaskThresholdTries = 0;
         tabMissLogged = false;
         lastTabTryAt = 0;
         statusText = '已启动，正在寻找视频…';
@@ -878,12 +855,14 @@
     });
 
     /* 看完阈值：智能 / 90% / 100% 三选一（互斥）
-       智能 = 播到结尾后，等右侧目录任务点标记"完成"才切（最稳，自动适配"要求全部看完"的视频）
-       90%  = 进度≥90% 直接切下一节（不等任务点完成）
-       100% = 视频必须播到结尾才切（满足"要求全部看完"，但不等平台确认） */
+       智能 = 读视频旁「任务点」面板的完成条件（如"观看时长≥总时长90%"），看够就切（自动适配 90%/100% 视频；只看本视频任务点，不等整节里的考核等其它任务点）
+       90%  = 进度≥90% 直接切下一节
+       100% = 视频必须播到结尾才切 */
     panel.querySelector('#cx-ratio-smart').addEventListener('click', function () {
       finishMode = 'smart';
-      log('看完阈值已设为「智能」：播到结尾后，等目录任务点标记完成才切下一节', 'ok');
+      videoTaskThreshold = null;      // 切回智能时重新读阈值
+      videoTaskThresholdTries = 0;
+      log('看完阈值已设为「智能」：读视频完成条件（如≥90%），看够就切下一节', 'ok');
       renderPanel();
     });
     panel.querySelector('#cx-ratio-90').addEventListener('click', function () {
