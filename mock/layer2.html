@@ -148,10 +148,13 @@
     if (window.__completeAt && !window.__markedComplete && Date.now() >= window.__completeAt) {
       window.__markedComplete = true;
       try {
-        var top = window.parent && window.parent.parent;
-        /* 真站：平台落库完成后，**顶部标题区**出现"✓ 任务点已完成"（与视频旁的阈值小面板是两个元素）。
-           注意这里**不改** #taskpoint-panel —— 它保持"未完成任务点前…"，以验证完成检测确实靠
-           顶部横幅、而不是靠阈值面板的文案。 */
+        var l1 = window.parent;                                    // layer1（任务点容器所在层）
+        var top = window.parent && window.parent.parent;            // 顶层（标题区横幅）
+        /* 真站权威信号：任务点容器里的 .ans-job-icon 标记完成（aria-label + 背景雪碧图第二帧）。
+           脚本 v1.3.17 的智能检测主路径就是读这个。 */
+        if (l1 && l1.markTaskComplete) l1.markTaskComplete();
+        /* 顶部标题区横幅也翻转（与 .ans-job-icon 同时发生，真实站点两者一致）；
+           同时作为脚本文本兜底的命中源。 */
         if (top && top.markTaskComplete) top.markTaskComplete();
         if (top && top.markActiveComplete) top.markActiveComplete();
       } catch (e) {}

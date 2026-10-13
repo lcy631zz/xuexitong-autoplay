@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         超星学习通 · 自动播放 + 播完自动下一节
 // @namespace    workbuddy.chaoxing.autonext
-// @version      1.3.16
+// @version      1.3.17
 // @description  自动播放当前章节的视频；播放完成后自动点击右侧目录的下一节并继续播放。不加速、不绕过平台的防挂机检测（视频内弹出的单选/多选题会自动尝试作答，多选暴力枚举组合）。
 // @author       WorkBuddy
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -600,38 +600,107 @@
     return null;
   }
 
-  /* 智能模式：检测"页面是否已明确显示【本视频】任务点完成"。
-     真站权威信号（据用户真站截图锁定）：视频上方标题区会显示一个**绿色状态徽标「任务点已完成」**
-     （未完成时显示"任务点未完成"或不显示）。截图实拍：标题下方一行"✓ 任务点已完成"。
-     关键取舍：
-       - 只认"任务点已完成"这个**完整短语**，不认裸"已完成"。
-         裸"已完成"会误命中右侧目录里其它早已看完的章节（这正是 v1.3.13 的 bug 根源：
-         搜整页"已完成"→ 被别的章节带偏 → 当前视频没完成就提前切）。
-         "任务点已完成"是当前视频独有的状态徽标，既对齐真站、又天然避开目录干扰。
-       - 只认"短标签"元素（文本 ≤ 60 字），排除把整页/目录算进来的大容器。
-       - 排除含"未完成"的（"任务点未完成""未完成任务点前…"都不是完成态）。
-       - 兜底再排除位于右侧目录（posCatalog* / id 含 catalog）内的元素。
-     注：不把静态的"完成条件 / 观看时长需 ≥…"要求文案当完成信号——那是要求，一直都在。 */
-  function detectVideoTaskCompleted() {
-    const docs = collectDocs();
-    const DONE = /任务点[\s：:·]*已\s*完成/;   // 真站徽标"任务点已完成"（当前视频独有，不会命中目录里的裸"已完成"）
-    const NOTDONE = /未完成/;
-    let best = null;
-    for (let i = 0; i < docs.length; i++) {
-      let els;
-      try { els = docs[i].querySelectorAll('*'); } catch (e) { continue; }
-      for (let j = 0; j < els.length; j++) {
-        const el = els[j];
-        const t = (el.textContent || '').replace(/\s+/g, '');
-        if (!t || t.length > 60) continue;              // 只要"短状态标签"，不要大容器
-        if (!DONE.test(t) || NOTDONE.test(t)) continue; // 必须是"任务点已完成"且不含"未完成"
-        if (isInCatalog(el)) continue;                  // 目录里的不算（防别的章节）
-        if (!best || t.length < best.len) best = { el: el, len: t.length }; // 取"最短"命中 = 状态徽标本身
+  /* 智能模式：检测"当前视频"的任务点是否已完成。
+     真站权威信号（超星前端固定写法，多个公开脚本均如此判定，**不是页面文本**）：
+       内容页(#iframe)里每个任务点是一个 div.ans-attach-ct，其内 --
+         - div.ans-job-icon：状态图标。aria-label / title = "任务点已完成" 或 "任务点未完成"；
+           完成时 background-position 变成 "0px -24px"（未完成是 "0 0"，用的是 job-status.png 雪碧图）；
+         - 有的版本直接给 .ans-attach-ct 加 class "ans-job-finished"，或图标加 "ans-job-icon-clear"。
+       视频 iframe 就嵌在对应的 .ans-attach-ct 里，所以"当前在播视频"的任务点容器可由视频的
+       frameElement 向上回溯拿到 —— 只判当前视频这一个任务点，不受本章其它任务点（考核/文档）影响。
+     ⚠ 这就是之前一直失败的原因：这些字样在 aria-label 属性里、完成态靠背景雪碧图换位表示，
+       **不在 textContent 里** —— 所以"搜页面文本"永远搜不到（会一直等到 90 秒兜底）。
+     兜底顺序：① 当前视频任务点容器 → ② 页面任一 .ans-job-icon 明确"已完成" → ③ 短文本含"任务点已完成"（本地 mock/变体）。 */
+  function jobIconDone(icon) {
+    if (!icon) return null;
+    try {
+      if (icon.classList && icon.classList.contains('ans-job-icon-clear')) return true;
+      const al = (icon.getAttribute('aria-label') || icon.getAttribute('title') || '').replace(/\s+/g, '');
+      if (al) {
+        if (/未完成/.test(al)) return false;
+        if (/任务点已完成|已完成/.test(al)) return true;
       }
-    }
-    if (!best) return false;
-    try { window.__cxDoneMatch = (best.el.outerHTML || best.el.textContent || '').replace(/\s+/g, ' ').slice(0, 400); } catch (e) {}
-    return true;
+      const win = icon.ownerDocument && icon.ownerDocument.defaultView;
+      if (win) {
+        const bg = (win.getComputedStyle(icon).backgroundPosition || '').replace(/\s+/g, ' ').trim();
+        if (/^0(px)? -24px$/i.test(bg)) return true;    // 完成（雪碧图第二帧）
+        if (/^0(px)? 0(px)?$/i.test(bg)) return false;  // 未完成（第一帧）
+      }
+    } catch (e) {}
+    return null; // 信息不足，交给上层兜底
+  }
+
+  /* 从"当前在播视频"回溯到它所在的任务点容器 div.ans-attach-ct */
+  function currentAttachCt(v) {
+    try {
+      const win = v && v.ownerDocument && v.ownerDocument.defaultView;
+      const fe = win && win.frameElement;             // 视频所在 iframe（位于内容页里）
+      if (!fe) return null;
+      let n = fe;
+      for (let i = 0; i < 6 && n; i++) {
+        if (n.classList && n.classList.contains('ans-attach-ct')) return n;
+        n = n.parentElement;
+      }
+      n = fe;                                          // 放宽：退而求其次找最近的含 .ans-job-icon 的祖先
+      for (let i = 0; i < 6 && n; i++) {
+        if (n.querySelector && n.querySelector('.ans-job-icon, .ans-job-icon-clear')) return n;
+        n = n.parentElement;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function setDoneMatch(el) {
+    try {
+      const s = el ? String(el.outerHTML || el.textContent || '') : '';
+      window.__cxDoneMatch = s.replace(/\s+/g, ' ').slice(0, 400);
+    } catch (e) {}
+  }
+
+  function detectVideoTaskCompleted(v) {
+    /* ① 真站权威：当前视频所在任务点容器 */
+    try {
+      const ct = currentAttachCt(v);
+      if (ct) {
+        if (/\bans-job-finished\b/.test(ct.className || '')) { setDoneMatch(ct); return true; }
+        const icon = ct.querySelector('.ans-job-icon, .ans-job-icon-clear');
+        const d = jobIconDone(icon);
+        if (d === true) { setDoneMatch(icon); return true; }
+        if (d === false) return false;               // 明确未完成 → 本视频任务点没完成，继续等
+      }
+    } catch (e) {}
+    /* ② 次选：页面里任一 .ans-job-icon 明确标"任务点已完成"（拿不到容器时） */
+    try {
+      const docs = collectDocs();
+      for (let i = 0; i < docs.length; i++) {
+        let icons;
+        try { icons = docs[i].querySelectorAll('.ans-job-icon, .ans-job-icon-clear'); } catch (e) { continue; }
+        for (let j = 0; j < icons.length; j++) {
+          if (jobIconDone(icons[j]) === true) { setDoneMatch(icons[j]); return true; }
+        }
+      }
+    } catch (e) {}
+    /* ③ 兜底：短文本元素含"任务点已完成"（本地 mock / 页面变体） */
+    try {
+      const docs = collectDocs();
+      const DONE = /任务点[\s：:·]*已\s*完成/;
+      const NOTDONE = /未完成/;
+      let best = null;
+      for (let i = 0; i < docs.length; i++) {
+        let els;
+        try { els = docs[i].querySelectorAll('*'); } catch (e) { continue; }
+        for (let j = 0; j < els.length; j++) {
+          const el = els[j];
+          const t = (el.textContent || '').replace(/\s+/g, '');
+          if (!t || t.length > 60) continue;
+          if (!DONE.test(t) || NOTDONE.test(t)) continue;
+          if (isInCatalog(el)) continue;
+          if (!best || t.length < best.len) best = { el: el, len: t.length };
+        }
+      }
+      if (best) { setDoneMatch(best.el); return true; }
+    } catch (e) {}
+    return false;
   }
 
   /* 元素是否位于右侧课程目录内（posCatalog* 类名，或 id 含 catalog）——
@@ -674,6 +743,30 @@
         const clsp = (typeof el.className === 'string' && el.className.trim())
           ? ('.' + el.className.trim().replace(/\s+/g, '.')) : '';
         out.push('<' + tag + idp + clsp + '>' + t);
+      }
+    }
+    return out.join(' | ');
+  }
+
+  /* 诊断：列出页面里所有 .ans-job-icon / .ans-job-icon-clear 的状态（aria-label + backgroundPosition）。
+     真站完成信号就藏在这，进入"等待完成"时打印一行，万一某次没切换，凭这行即可确认是"雪碧图没变位"还是"真没完成"。 */
+  function diagJobIcons() {
+    const docs = collectDocs();
+    const out = [];
+    for (let i = 0; i < docs.length && out.length < 8; i++) {
+      let icons;
+      try { icons = docs[i].querySelectorAll('.ans-job-icon, .ans-job-icon-clear'); } catch (e) { continue; }
+      for (let j = 0; j < icons.length && out.length < 8; j++) {
+        const ic = icons[j];
+        const al = (ic.getAttribute('aria-label') || ic.getAttribute('title') || '').replace(/\s+/g, '');
+        let bg = '';
+        try {
+          const win = ic.ownerDocument && ic.ownerDocument.defaultView;
+          if (win) bg = (win.getComputedStyle(ic).backgroundPosition || '').replace(/\s+/g, ' ').trim();
+        } catch (e) {}
+        const cls = (typeof ic.className === 'string' && ic.className.trim())
+          ? ('.' + ic.className.trim().replace(/\s+/g, '.')) : '';
+        out.push('<div' + cls + ' aria-label="' + al + '" bg="' + bg + '">');
       }
     }
     return out.join(' | ');
@@ -791,8 +884,8 @@
       /* 智能：必须等"页面明确显示本视频任务完成"才切，绝不按百分比提前跳。 */
       if (!gateReached) return; /* 还没看够门槛，继续播（上方已显示"播放中 X%"进度） */
 
-      /* 已达观看门槛 → 轮询显式完成信号 */
-      if (detectVideoTaskCompleted()) {
+      /* 已达观看门槛 → 轮询显式完成信号（真站信号在 .ans-job-icon 的 aria-label / 背景雪碧图，不在文本） */
+      if (detectVideoTaskCompleted(v)) {
         if (!videoCompletedSignaled) {
           videoCompletedSignaled = true;
           const m = (typeof window.__cxDoneMatch === 'string' && window.__cxDoneMatch)
@@ -812,6 +905,8 @@
         if (diag) log('ℹ 等待期任务点面板 HTML(节选)：' + diag, 'info');
         const cand = diagTaskStatusLabels();
         if (cand) log('ℹ 等待期"任务点"状态标签候选：' + cand, 'info');
+        const jic = diagJobIcons();
+        if (jic) log('ℹ 等待期 .ans-job-icon 诊断：' + jic, 'info');
       }
       const waited = Date.now() - waitingCompleteSince;
       if (waited > CFG.COMPLETE_MAXWAIT_MS) {

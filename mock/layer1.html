@@ -1,13 +1,39 @@
 <!doctype html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><title>layer1</title>
-<style>html,body{margin:0;height:100%}iframe{width:100%;height:100%;border:0;display:block}</style>
+<style>
+  html,body{margin:0;height:100%}
+  iframe{width:100%;height:100%;border:0;display:block}
+  /* 模拟超星内容页：每个任务点是一个 div.ans-attach-ct，里面嵌视频 iframe + 状态图标 .ans-job-icon。
+     视频 iframe 就在这个容器里，脚本可由 video.frameElement 向上回溯拿到本任务点容器。 */
+  .ans-attach-ct{position:relative;height:100%}
+  .ans-job-icon{position:absolute;right:8px;top:8px;width:24px;height:24px;
+    display:inline-block;background:#eee;border:1px solid #ccc;border-radius:4px;
+    background-position:0px 0px;}
+</style>
 </head>
 <body>
-  <iframe id="vframe"></iframe>
+  <!-- 真站结构：任务点容器 + 状态图标（未完成态） -->
+  <div class="ans-attach-ct" id="attach-ct">
+    <iframe id="vframe"></iframe>
+    <div class="ans-job-icon" id="job-icon" aria-label="任务点未完成" title="任务点未完成"></div>
+  </div>
 <script>
   var n = new URLSearchParams(location.search).get('n') || '1';
   document.getElementById('vframe').src = 'layer2.html?n=' + n;
+
+  /* 模拟超星落库完成：把当前任务点图标标记为已完成。
+     真站完成态写在这两处（脚本据此判定）：
+       · aria-label / title 从 "任务点未完成" 变成 "任务点已完成"；
+       · 背景雪碧图第二帧 background-position: 0px -24px（未完成是 0px 0px）。 */
+  window.markTaskComplete = function () {
+    var ic = document.getElementById('job-icon');
+    if (ic) {
+      ic.setAttribute('aria-label', '任务点已完成');
+      ic.setAttribute('title', '任务点已完成');
+      ic.style.backgroundPosition = '0px -24px';
+    }
+  };
 </script>
 </body>
 </html>
