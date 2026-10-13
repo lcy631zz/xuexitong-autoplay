@@ -79,8 +79,11 @@
   /* 奇数节默认落在「基础知识」（视频要手动点进去），偶数节直接进视频 */
   showTab((Number(n) % 2 === 1) ? 0 : 2);
 
-  /* ---------- 假视频：进度用 Date.now() 算，不受后台节流影响 ---------- */
-  var DUR = 8, MS_PER_SEC = 125, accum = 0, segStart = 0;
+  /* ---------- 假视频：进度用 Date.now() 算，不受后台节流影响 ----------
+     1 视频秒 = 1 真实秒（MS_PER_SEC=1000），让"完成标记出现在视频中段"这类时序可被观测。
+     DUR=10：视频在 50%（t=5）时被平台标记完成，脚本 2.5s 切换延迟后 t≈7.5 就切走 —— 仍未到结尾，
+     从而能证明"一见完成标记就切"（而非等到播完）。 */
+  var DUR = 10, MS_PER_SEC = 1000, accum = 0, segStart = 0;
   function segElapsed() { return segStart ? (Date.now() - segStart) / MS_PER_SEC : 0; }
   function elapsed() { return accum + segElapsed(); }
 
@@ -126,7 +129,7 @@
   });
 
   function maybeShowQuiz() {
-    if (!window.__quizShown && !window.__quizSolved && v.currentTime >= 3) {
+    if (!window.__quizShown && !window.__quizSolved && v.currentTime >= 1) {
       window.__quizShown = true;
       v.pause();                                       // 弹出弹题时暂停视频
       vq.style.display = 'block';
@@ -142,10 +145,11 @@
   };
 
   setInterval(function () {
-    /* 视频真正结束后：平台**延迟 2 秒**才把「任务点」标记为完成（模拟超星落库延迟，
-       即"视频播完了、页面还没显示完成"的那段窗口）。脚本智能模式必须等这个显式信号才切。 */
-    if (v.ended && !window.__completeAt) window.__completeAt = Date.now() + 2000;
-    if (window.__completeAt && !window.__markedComplete && Date.now() >= window.__completeAt) {
+    /* ⭐ 真站实测：平台会在视频**还没播完**（约 90%+）时就把任务点标记为「已完成」。
+       这里复现该场景：视频播到 **50%** 就标记完成 —— 远早于"观看要求"门槛、也早于视频结束。
+       v1.3.18 的智能模式必须"一看到完成标记就切"，而不是死等百分比门槛或视频播完。 */
+    if (!window.__doneMarkAt && v.currentTime >= DUR * 0.5) window.__doneMarkAt = Date.now() + 400;
+    if (window.__doneMarkAt && !window.__markedComplete && Date.now() >= window.__doneMarkAt) {
       window.__markedComplete = true;
       try {
         var l1 = window.parent;                                    // layer1（任务点容器所在层）

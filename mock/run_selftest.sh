@@ -23,11 +23,11 @@ sleep 1.5
 # 点「开始自动」
 "$AB" eval "var b=document.querySelector('#cx-autonext-panel #cx-toggle');if(b){b.click();'started'}else{'NO_PANEL'}"
 
-# 等整轮跑完（4 节，每节含弹题暴力作答）
-"$AB" wait 80000
+# 等整轮跑完（4 节，每节含弹题暴力作答；DUR=10 视频秒/节）
+"$AB" wait 95000
 
 # 读取结果
-"$AB" eval "(function(){try{var f=document.getElementById('iframe');var vframe=f.contentDocument.getElementById('vframe');var l2win=vframe.contentDocument.defaultView;var st=(typeof l2win.__state==='function')?l2win.__state():null;return JSON.stringify({activated:window.__activated,panelLog:(document.querySelector('#cx-autonext-panel #cx-log')||{innerText:'(no panel)'}).innerText,deepest:st});}catch(e){return 'ERR:'+e;}})()"
+"$AB" eval "(function(){try{var f=document.getElementById('iframe');var vframe=f.contentDocument.getElementById('vframe');var l2win=vframe.contentDocument.defaultView;var st=(typeof l2win.__state==='function')?l2win.__state():null;return JSON.stringify({activated:window.__activated,switchStates:window.__switchStates||[],panelLog:(document.querySelector('#cx-autonext-panel #cx-log')||{innerText:'(no panel)'}).innerText,deepest:st});}catch(e){return 'ERR:'+e;}})()"
 
 "$AB" screenshot "$DIR/mock/selftest-quiz.png"
 "$AB" close

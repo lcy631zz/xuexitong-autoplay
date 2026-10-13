@@ -23,9 +23,9 @@ sleep 1.5
 # 再点「开始自动」
 "$AB" eval "var b=document.querySelector('#cx-autonext-panel #cx-toggle');if(b){b.click();'started'}else{'NO_PANEL'}"
 
-"$AB" wait 70000
+"$AB" wait 100000
 
-"$AB" eval "(function(){try{var f=document.getElementById('iframe');var vframe=f.contentDocument.getElementById('vframe');var l2win=vframe.contentDocument.defaultView;var st=(typeof l2win.__state==='function')?l2win.__state():null;return JSON.stringify({activated:window.__activated,panelLog:(document.querySelector('#cx-autonext-panel #cx-log')||{innerText:'(no panel)'}).innerText,deepest:st});}catch(e){return 'ERR:'+e;}})()"
+"$AB" eval "(function(){try{var f=document.getElementById('iframe');var vframe=f.contentDocument.getElementById('vframe');var l2win=vframe.contentDocument.defaultView;var st=(typeof l2win.__state==='function')?l2win.__state():null;return JSON.stringify({activated:window.__activated,switchStates:window.__switchStates||[],panelLog:(document.querySelector('#cx-autonext-panel #cx-log')||{innerText:'(no panel)'}).innerText,deepest:st});}catch(e){return 'ERR:'+e;}})()"
 
 "$AB" close
 kill $SRV 2>/dev/null || true
