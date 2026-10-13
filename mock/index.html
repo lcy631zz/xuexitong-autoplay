@@ -69,7 +69,8 @@
 
   function activate(i) {
     /* 切章前，先记录"上一节视频被切走那一刻"的状态（ended / t / 播放次数）——
-       自测据此验证脚本是"一看到完成标记就切"（此时视频还没播到结尾），还是死等到了结尾。 */
+       自测据此验证脚本是"视频真正播完（ended）才切"（ended 应为 true、t 接近 DUR），
+       而不是在 50% 的"完成标记"出现时就提前切（那是 v1.3.18 之前的旧行为，已废弃）。 */
     try {
       var of = document.getElementById('iframe');
       var ovf = of && of.contentDocument && of.contentDocument.getElementById('vframe');

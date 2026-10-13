@@ -146,8 +146,8 @@
 
   setInterval(function () {
     /* ⭐ 真站实测：平台会在视频**还没播完**（约 90%+）时就把任务点标记为「已完成」。
-       这里复现该场景：视频播到 **50%** 就标记完成 —— 远早于"观看要求"门槛、也早于视频结束。
-       v1.3.18 的智能模式必须"一看到完成标记就切"，而不是死等百分比门槛或视频播完。 */
+       这里复现该场景：视频播到 **50%** 就标记完成（作为"红鲱鱼"——v1.3.19 起脚本不再看这个徽章，
+       必须等到视频真正播完的 ended 事件才切；本标记若还能触发切换，说明回归了，自测要抓出来）。 */
     if (!window.__doneMarkAt && v.currentTime >= DUR * 0.5) window.__doneMarkAt = Date.now() + 400;
     if (window.__doneMarkAt && !window.__markedComplete && Date.now() >= window.__doneMarkAt) {
       window.__markedComplete = true;
@@ -162,6 +162,12 @@
         if (top && top.markTaskComplete) top.markTaskComplete();
         if (top && top.markActiveComplete) top.markActiveComplete();
       } catch (e) {}
+    }
+    /* v1.3.19 对齐：真实 <video> 播完会派发原生 ended 事件；mock 用假对象，这里手动派发一次，
+       让脚本的 ended 监听器（onVideoEnded）真正被触发 —— 验证"切下一节由 ended 驱动"而非看徽章。 */
+    if (v.ended && !window.__endedDispatched) {
+      window.__endedDispatched = true;
+      try { v.dispatchEvent(new Event('ended')); } catch (e) {}
     }
     maybeShowQuiz();
     document.getElementById('hud').textContent =

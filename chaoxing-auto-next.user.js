@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         超星学习通 · 自动播放 + 播完自动下一节
 // @namespace    workbuddy.chaoxing.autonext
-// @version      1.3.18
+// @version      1.3.19
 // @description  自动播放当前章节的视频；播放完成后自动点击右侧目录的下一节并继续播放。不加速、不绕过平台的防挂机检测（视频内弹出的单选/多选题会自动尝试作答，多选暴力枚举组合）。
 // @author       WorkBuddy
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -15,15 +15,12 @@
  * ---------------------------------------------------------------
  * 本脚本只做两件"免手动操作"的事：
  *   1) 进入某节后，自动点一下播放键（你本来也要点的）；
- *   2) 看完阈值两种模式（面板可切换，默认"智能"）：
- *        · 智能（默认）：**只要平台把"本视频"任务点标记为「已完成」就立刻切下一节**。真站的完成信号写在
- *          内容页任务点容器 div.ans-attach-ct 里的状态图标 .ans-job-icon 上——`aria-label`（或 title）从
- *          "任务点未完成" 变成 "任务点已完成"，背景雪碧图第二帧 `background-position: 0px -24px`（未完成是
- *          `0px 0px`）；脚本由 video.frameElement 精确定位到"当前视频"这一个任务点容器，**每帧轮询、一见完成
- *          标记就切**，不再等百分比（实测真站会在视频播到 ~96% 时先标记完成、而"观看要求"门槛还没到）。
- *          若一直等不到标记，才退化为"看够「任务点」面板要求的门槛 → 等待 → 超时安全兜底切"。只盯"本视频"，
- *          不被本章其它任务点（考核/文档）或右侧目录里已看完章节干扰。
- *        · 100%：视频必须播到结尾才直接切（不等平台确认）。
+ *   2) 切下一节由**视频原生 ended 事件**驱动（v1.3.19 起，对齐主流 2.8k★ 脚本做法）：
+ *        · 进入某节、接管 <video> 后，给视频绑定原生 addEventListener('ended', …)；
+ *        · 视频一旦真正播完（浏览器原生 ended 事件），等 SWITCH_DELAY_MS 让平台落库，再点右侧目录的下一节；
+ *        · **不再轮询"任务点完成"徽章**（.ans-job-icon 的雪碧图换位 / aria-label——这些是平台易变、
+ *          且正是我们之前"页面已显示完成、脚本却不切"的根因），也不再按百分比门槛提前跳；
+ *        · 另设一道"ended 状态保底"：万一监听器漏接（如平台重建 video 元素），轮询发现 v.ended 且未切，补一次切换。
  * 视频仍然按 1 倍速、在前台、真实播放完整时长，不改学习记录。
  * 默认【静音】自动播放（浏览器普遍拦截"带声音的自动播放"，静音才稳；面板右侧 🔇/🔊 可一键切回有声）。
  *
@@ -80,11 +77,13 @@
   let switching = false;         // 正在切章节，避免重复触发
   let videoTaskThreshold = null;     // 智能模式：从「任务点」面板读到的本视频完成阈值（如 0.90）；null=还没读到
   let videoTaskThresholdTries = 0;   // 已尝试读取阈值的次数（封顶后按 0.999 兜底，避免反复搜）
-  let finishMode = 'smart';      // 看完阈值模式：'smart' 智能（读视频完成阈值，等页面显式标记完成才切）/ 'ratio100'（100% 直接切）
+  let finishMode = 'smart';      // 历史保留字段（早期"智能/100%"阈值模式）；v1.3.19 起切下一节改为视频 ended 事件驱动，本字段已不再影响切换逻辑
   let videoCompletedSignaled = false; // 智能模式：本视频是否已检测到"页面明确显示任务完成"信号
   let waitingCompleteSince = 0;   // 智能模式：进入"等页面标记任务完成"状态的起始时间戳（0=还没进）
   let iconDiagKey = '';          // 本视频的 .ans-job-icon 一次性诊断是否已打印（值为 videoKey，避免重复刷屏）
   let lastKey = '';              // 当前已接管的视频标识
+  let endedBoundVideo = null;     // 已绑定 ended 监听的视频元素（每个视频只绑一次）
+  let endedSwitchInitiated = false; // 本视频的"播放结束→切下一节"是否已发起（防 ended 事件重复/抖动触发）
   let lastTabTryAt = 0;          // 上次尝试点「视频」标签的时间
   let tabMissLogged = false;     // 「本节没有视频标签」只提醒一次
   let quizState = null;          // 当前正在处理的弹题状态
@@ -806,6 +805,26 @@
     }, CFG.SWITCH_DELAY_MS);
   }
 
+  /* v1.3.19：给"当前视频"绑定原生 ended 事件，作为切下一节的唯一触发源。
+     每个视频只绑一次（以视频元素为键，避免重复绑定导致一次结束多次切）。 */
+  function armEndedListener(v) {
+    if (!v) return;
+    if (endedBoundVideo === v) return;          // 同一视频已绑过，跳过
+    if (endedBoundVideo && endedBoundVideo !== v) {
+      try { endedBoundVideo.removeEventListener('ended', onVideoEnded); } catch (e) {}
+    }
+    endedBoundVideo = v;
+    endedSwitchInitiated = false;
+    try { v.addEventListener('ended', onVideoEnded); } catch (e) {}
+  }
+
+  function onVideoEnded() {
+    if (endedSwitchInitiated) return;            // 防 ended 事件重复/抖动触发
+    endedSwitchInitiated = true;
+    log('🏁 视频播放结束（原生 ended 事件），准备切下一节', 'ok');
+    doSwitch();
+  }
+
   /* ================================================================
    * 6. 主循环
    * ================================================================ */
@@ -860,6 +879,8 @@
       setStatus('已接管新视频，准备播放…');
       log('🎬 检测到视频：' + shortName(key) + '（时长 ' + fmtTime(v.duration) + '）');
       tryPlay(v);
+      endedSwitchInitiated = false; // 新视频：重置"播放结束→切下一节"的发起标志
+      armEndedListener(v);          // 新视频：绑定原生 ended 事件（v1.3.19 起切下一节的唯一触发源）
       return;
     }
 
@@ -888,74 +909,14 @@
       log('ℹ 本视频 .ans-job-icon 诊断：' + (jic0 || '(未找到 .ans-job-icon)'), 'info');
     }
 
-    /* 切换阈值 / 切换触发逻辑：
-       100% 模式 = 0.999（≈播到结尾，直接切）；
-       智能 模式 = 从「任务点」面板读本视频的"观看要求"（如"观看时长 ≥ 总时长 90%"）作为门槛，
-                 达到门槛或视频播到结尾后，**不按百分比提前跳**，而是轮询等待页面明确显示
-                 "本视频任务已完成/已完成" 这个显式信号，出现才切（严格对齐平台真实完成态）。 */
-    let gateThreshold;
-    if (finishMode === 'ratio100') {
-      gateThreshold = 0.999;
-    } else {
-      /* 智能：懒读取并缓存本视频的"观看要求"阈值（仅作为进门门槛，不是切的触发器） */
-      if (videoTaskThreshold == null) {
-        videoTaskThreshold = readVideoTaskThreshold();
-        videoTaskThresholdTries += 1;
-        if (videoTaskThreshold == null && videoTaskThresholdTries >= 30) {
-          videoTaskThreshold = 0.999; /* 读不到就按接近结尾兜底，不再反复搜 */
-        }
-      }
-      gateThreshold = (videoTaskThreshold != null) ? videoTaskThreshold : 0.999;
-    }
-
-    const gateReached = v.ended || ratio >= gateThreshold;
-
-    if (finishMode === 'smart') {
-      /* ⭐ 平台一旦显式标记本视频任务点「已完成」，**立即切** —— 不看百分比门槛。
-         平台的完成标记才是权威信号：实测真站「✓ 任务点已完成」会在视频播到 ~96% 时就出现，
-         此时"观看要求"门槛（如 100%）往往还没到；若非要等门槛才检查，就会出现
-         "页面已显示完成、脚本却一直不切"（旧版假阴性的直接原因）。 */
-      if (detectVideoTaskCompleted(v)) {
-        if (!videoCompletedSignaled) {
-          videoCompletedSignaled = true;
-          const m = (typeof window.__cxDoneMatch === 'string' && window.__cxDoneMatch)
-            ? '（匹配元素：' + window.__cxDoneMatch + '）' : '';
-          log('✅ 平台已标记本视频任务点「已完成」，切下一节' + m, 'ok');
-        }
-        doSwitch();
-        return;
-      }
-
-      /* 还没看到完成标记：先看够"观看要求"门槛，再进等待轮询（兜底：门槛到了仍无标记 → 超时也切） */
-      if (!gateReached) return; /* 还没看够门槛，继续播（上方已显示"播放中 X%"进度） */
-
-      if (!waitingCompleteSince) {
-        waitingCompleteSince = Date.now();
-        log('ℹ 已满足观看要求（≥' + Math.round(gateThreshold * 100) +
-            '%），开始等待平台标记「任务点完成」后再切（不再按百分比提前跳）', 'info');
-        const diag = diagTaskPointHTML();
-        if (diag) log('ℹ 等待期任务点面板 HTML(节选)：' + diag, 'info');
-        const cand = diagTaskStatusLabels();
-        if (cand) log('ℹ 等待期"任务点"状态标签候选：' + cand, 'info');
-        const jic = diagJobIcons();
-        if (jic) log('ℹ 等待期 .ans-job-icon 诊断：' + jic, 'info');
-      }
-      const waited = Date.now() - waitingCompleteSince;
-      if (waited > CFG.COMPLETE_MAXWAIT_MS) {
-        log('⚠ 已等待 ' + (CFG.COMPLETE_MAXWAIT_MS / 1000) +
-            ' 秒仍未检测到平台「任务点完成」标记，按安全兜底切下一节（可能任务点未真正记上，请把上面诊断发我校准）', 'warn');
-        doSwitch();
-        return;
-      }
-      setStatus('已看够 ' + Math.round(gateThreshold * 100) + '%，等平台标记「任务点完成」中…（已等 ' +
-                Math.round(waited / 1000) + 's）');
-      return;
-    }
-
-    /* 100% 模式：达到阈值（或 ended）直接切，不等平台确认 */
-    if (gateReached) {
-      const pct = (v.ended ? 100 : ratio * 100).toFixed(1);
-      log('✅ 本节已达看完阈值（' + pct + '%），直接切下一节', 'ok');
+    /* 切换触发逻辑（v1.3.19 起）：改由视频原生 ended 事件驱动（见 onVideoEnded）。
+       不再轮询"任务点完成"徽章（.ans-job-icon 雪碧图/aria-label），也不再按百分比门槛提前跳——
+       那些是平台易变、曾导致"页面已显示完成、脚本却不切"的东西。
+       这里只做一道"ended 状态保底"：万一监听器漏接（如平台重建 video 元素），只要轮询发现
+       v.ended 且还没发起切换，就补一次切换（与 ended 事件同一条件，不是新增百分比逻辑）。 */
+    if (v.ended && !endedSwitchInitiated && !switching) {
+      log('🏁 视频已播完（ended 状态保底触发），准备切下一节', 'ok');
+      endedSwitchInitiated = true;
       doSwitch();
       return;
     }
@@ -990,16 +951,7 @@
       btn.textContent = running ? '⏸ 暂停自动' : '▶ 开始自动';
       btn.style.background = running ? '#e5533d' : '#1a7f37';
     }
-    /* 看完阈值按钮高亮（当前选中的那个亮绿，其余白底） */
-    const rSmart = panel.querySelector('#cx-ratio-smart');
-    const r100 = panel.querySelector('#cx-ratio-100');
-    if (rSmart && r100) {
-      const ON = '#1a7f37', OFF = '#fff', ONC = '#fff', OFFC = '#333';
-      rSmart.style.background = finishMode === 'smart' ? ON : OFF;
-      rSmart.style.color = finishMode === 'smart' ? ONC : OFFC;
-      r100.style.background = finishMode === 'ratio100' ? ON : OFF;
-      r100.style.color = finishMode === 'ratio100' ? ONC : OFFC;
-    }
+    /* v1.3.19 起切下一节由视频 ended 事件驱动，不再有「智能/100%」阈值切换按钮 */
     if (logEl) {
       let html = '';
       for (let i = logs.length - 1; i >= 0; i--) {
@@ -1055,13 +1007,9 @@
       '    <button id="cx-next" style="cursor:pointer;border:1px solid #d0d5dd;border-radius:6px;padding:7px 10px;background:#fff;font-size:12px;">手动下一节</button>',
       '    <button id="cx-mute" title="切换静音/有声" style="cursor:pointer;border:1px solid #d0d5dd;border-radius:6px;padding:7px 9px;background:#fff;font-size:13px;">🔇</button>',
       '  </div>',
-      '  <div style="display:flex;align-items:center;gap:6px;margin:0 0 8px;">',
-      '    <span style="color:#475467;">看完阈值</span>',
-      '    <button id="cx-ratio-smart" style="cursor:pointer;border:1px solid #d0d5dd;border-radius:6px;padding:5px 12px;background:#1a7f37;color:#fff;font-size:12px;">智能</button>',
-      '    <button id="cx-ratio-100" style="cursor:pointer;border:1px solid #d0d5dd;border-radius:6px;padding:5px 12px;background:#fff;color:#333;font-size:12px;">100%</button>',
-      '  </div>',
+      '  <div style="color:#475467;margin:0 0 8px;">切下一节：视频放完自动切（原生 <b>ended</b> 事件）</div>',
       '  <div id="cx-log" style="max-height:150px;overflow-y:auto;border-top:1px solid #eceff3;padding-top:6px;"></div>',
-      '  <div style="color:#98a2b3;margin-top:6px;">1 倍速 · 默认静音 · 看完阈值(智能/100%) · 不绕过检测</div>',
+      '  <div style="color:#98a2b3;margin-top:6px;">1 倍速 · 默认静音 · 视频放完(ended)自动切下一节 · 不绕过检测</div>',
       '</div>'
     ].join('');
 
@@ -1078,6 +1026,8 @@
         waitingCompleteSince = 0;
         tabMissLogged = false;
         lastTabTryAt = 0;
+        endedBoundVideo = null;
+        endedSwitchInitiated = false;
         statusText = '已启动，正在寻找视频…';
         log('已启动自动播放', 'ok');
         tick();
@@ -1104,23 +1054,7 @@
       renderPanel();
     });
 
-    /* 看完阈值：智能 / 100% 二选一（互斥）
-       智能 = 读视频旁「任务点」面板的完成条件（如"观看时长≥总时长90%"）作为"看够没"的门槛；达到门槛后不按百分比提前跳，而是等页面明确显示"任务已完成/已完成"才切（严格对齐平台真实完成态，且只看本视频任务点，不等整节里的考核等其它任务点）
-       100% = 视频必须播到结尾才直接切（不等平台确认） */
-    panel.querySelector('#cx-ratio-smart').addEventListener('click', function () {
-      finishMode = 'smart';
-      videoTaskThreshold = null;      // 切回智能时重新读阈值
-      videoTaskThresholdTries = 0;
-      videoCompletedSignaled = false;
-      waitingCompleteSince = 0;
-      log('看完阈值已设为「智能」：看够要求时长后，等页面明确显示"任务已完成"才切下一节', 'ok');
-      renderPanel();
-    });
-    panel.querySelector('#cx-ratio-100').addEventListener('click', function () {
-      finishMode = 'ratio100';
-      log('看完阈值已设为 100%：视频必须播到结尾才切（满足"要求全部看完"，但不等平台确认）', 'ok');
-      renderPanel();
-    });
+    /* v1.3.19 起：切下一节由视频原生 ended 事件驱动，不再提供「智能/100%」阈值切换按钮 */
 
     let collapsed = false;
     panel.querySelector('#cx-min').addEventListener('click', function () {
