@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         超星学习通 · 自动播放 + 播完自动下一节
 // @namespace    workbuddy.chaoxing.autonext
-// @version      1.3.19
+// @version      1.3.20
 // @description  自动播放当前章节的视频；播放完成后自动点击右侧目录的下一节并继续播放。不加速、不绕过平台的防挂机检测（视频内弹出的单选/多选题会自动尝试作答，多选暴力枚举组合）。
 // @author       WorkBuddy
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -15,9 +15,9 @@
  * ---------------------------------------------------------------
  * 本脚本只做两件"免手动操作"的事：
  *   1) 进入某节后，自动点一下播放键（你本来也要点的）；
- *   2) 切下一节由**视频原生 ended 事件**驱动（v1.3.19 起，对齐主流 2.8k★ 脚本做法）：
+ *   2) 切下一节：视频播放到 100% 自然结束（原生 ended 事件）就自动切到下一节。v1.3.20 已彻底删除"智能/100%"阈值切换按钮，只保留这一种"默认百分百"行为（对齐主流 2.8k★ 脚本）：
  *        · 进入某节、接管 <video> 后，给视频绑定原生 addEventListener('ended', …)；
- *        · 视频一旦真正播完（浏览器原生 ended 事件），等 SWITCH_DELAY_MS 让平台落库，再点右侧目录的下一节；
+ *        · 视频一旦播放到 100%（浏览器原生 ended 事件），等 SWITCH_DELAY_MS 让平台落库，再点右侧目录的下一节；
  *        · **不再轮询"任务点完成"徽章**（.ans-job-icon 的雪碧图换位 / aria-label——这些是平台易变、
  *          且正是我们之前"页面已显示完成、脚本却不切"的根因），也不再按百分比门槛提前跳；
  *        · 另设一道"ended 状态保底"：万一监听器漏接（如平台重建 video 元素），轮询发现 v.ended 且未切，补一次切换。
@@ -59,9 +59,7 @@
    * ================================================================ */
   const CFG = {
     POLL_MS: 1500,        // 轮询间隔（毫秒）
-    // 看完阈值改由运行时变量 finishMode 控制（'smart' / 'ratio100'），见下方 let finishMode
-    SWITCH_DELAY_MS: 2500, // 达到看完阈值后，再等这么久让平台落库/上报，然后切下一节
-    COMPLETE_MAXWAIT_MS: 90000, // 智能模式：达观看门槛后，最多等这么久（秒级兜底）让页面标记"任务完成"；超时仍无信号才切走（防卡死，同时提示需校准）
+    SWITCH_DELAY_MS: 2500, // 视频播放到 100% 后，再等这么久让平台落库/上报，然后切下一节
     AUTOSTART: false,     // 打开页面是否自动开始
     MUTED: true,          // 默认静音播放（浏览器普遍拦截"带声音的自动播放"，静音才稳；面板可一键切回有声）
     MULTI_CHOICE: true,   // 是否自动答多选题（暴力枚举组合；关闭则多选题停下等手动）
@@ -75,12 +73,6 @@
    * ================================================================ */
   let running = CFG.AUTOSTART;   // 总开关
   let switching = false;         // 正在切章节，避免重复触发
-  let videoTaskThreshold = null;     // 智能模式：从「任务点」面板读到的本视频完成阈值（如 0.90）；null=还没读到
-  let videoTaskThresholdTries = 0;   // 已尝试读取阈值的次数（封顶后按 0.999 兜底，避免反复搜）
-  let finishMode = 'smart';      // 历史保留字段（早期"智能/100%"阈值模式）；v1.3.19 起切下一节改为视频 ended 事件驱动，本字段已不再影响切换逻辑
-  let videoCompletedSignaled = false; // 智能模式：本视频是否已检测到"页面明确显示任务完成"信号
-  let waitingCompleteSince = 0;   // 智能模式：进入"等页面标记任务完成"状态的起始时间戳（0=还没进）
-  let iconDiagKey = '';          // 本视频的 .ans-job-icon 一次性诊断是否已打印（值为 videoKey，避免重复刷屏）
   let lastKey = '';              // 当前已接管的视频标识
   let endedBoundVideo = null;     // 已绑定 ended 监听的视频元素（每个视频只绑一次）
   let endedSwitchInitiated = false; // 本视频的"播放结束→切下一节"是否已发起（防 ended 事件重复/抖动触发）
@@ -558,241 +550,6 @@
     return true;
   }
 
-  /* 收集一个节点自身 + 后代元素的所有 class（用于判断任务点完成态） */
-  function nodeClasses(node) {
-    if (!node) return '';
-    let s = node.className || '';
-    let els = [];
-    try { els = node.querySelectorAll('*'); } catch (e) {}
-    for (let i = 0; i < els.length; i++) {
-      if (els[i].className && typeof els[i].className === 'string') s += ' ' + els[i].className;
-    }
-    return s;
-  }
-
-  /* 定位"当前视频的任务点面板"：返回页面里含"完成条件"/"观看时长"且文本最短的元素
-     （最贴近本视频任务点本身，避开外层容器）。
-     这是"读观看要求阈值"与"检测本视频完成"的共同锚点——只在本视频任务点范围内判断，
-     避免被页面里其它已看完章节的"已完成"干扰（否则会出现"当前视频没完成就提前切"）。 */
-  function findCurrentTaskPointEl() {
-    const docs = collectDocs();
-    let best = null;
-    for (let i = 0; i < docs.length; i++) {
-      let els;
-      try { els = docs[i].querySelectorAll('*'); } catch (e) { continue; }
-      for (let j = 0; j < els.length; j++) {
-        const t = els[j].textContent || '';
-        if (t.indexOf('观看时长') === -1 && t.indexOf('完成条件') === -1) continue;
-        if (!best || t.length < best.len) best = { el: els[j], len: t.length };
-      }
-    }
-    return best ? best.el : null;
-  }
-
-  /* 从视频旁的「任务点」面板读取本视频的完成条件，返回阈值比例（如 0.90）；读不到返回 null。
-     面板文案形如："任务点 / 完成条件 / 观看时长需 ≥ 总时长的 90%"。 */
-  function readVideoTaskThreshold() {
-    const el = findCurrentTaskPointEl();
-    if (!el) return null;
-    const t = el.textContent || '';
-    const m = t.match(/总时长[^0-9]{0,8}(\d{1,3})\s*%/);
-    if (m) {
-      const pct = parseInt(m[1], 10);
-      if (pct >= 1 && pct <= 100) return pct / 100;
-    }
-    return null;
-  }
-
-  /* 智能模式：检测"当前视频"的任务点是否已完成。
-     真站权威信号（超星前端固定写法，多个公开脚本均如此判定，**不是页面文本**）：
-       内容页(#iframe)里每个任务点是一个 div.ans-attach-ct，其内 --
-         - div.ans-job-icon：状态图标。aria-label / title = "任务点已完成" 或 "任务点未完成"；
-           完成时 background-position 变成 "0px -24px"（未完成是 "0 0"，用的是 job-status.png 雪碧图）；
-         - 有的版本直接给 .ans-attach-ct 加 class "ans-job-finished"，或图标加 "ans-job-icon-clear"。
-       视频 iframe 就嵌在对应的 .ans-attach-ct 里，所以"当前在播视频"的任务点容器可由视频的
-       frameElement 向上回溯拿到 —— 只判当前视频这一个任务点，不受本章其它任务点（考核/文档）影响。
-     ⚠ 这就是之前一直失败的原因：这些字样在 aria-label 属性里、完成态靠背景雪碧图换位表示，
-       **不在 textContent 里** —— 所以"搜页面文本"永远搜不到（会一直等到 90 秒兜底）。
-     兜底顺序：① 当前视频任务点容器 → ② 页面任一 .ans-job-icon 明确"已完成" → ③ 短文本含"任务点已完成"（本地 mock/变体）。 */
-  function jobIconDone(icon) {
-    if (!icon) return null;
-    try {
-      if (icon.classList && icon.classList.contains('ans-job-icon-clear')) return true;
-      const al = (icon.getAttribute('aria-label') || icon.getAttribute('title') || '').replace(/\s+/g, '');
-      if (al) {
-        if (/未完成/.test(al)) return false;
-        if (/任务点已完成|已完成/.test(al)) return true;
-      }
-      const win = icon.ownerDocument && icon.ownerDocument.defaultView;
-      if (win) {
-        const bg = (win.getComputedStyle(icon).backgroundPosition || '').replace(/\s+/g, ' ').trim();
-        if (/^0(px)? -24px$/i.test(bg)) return true;    // 完成（雪碧图第二帧）
-        if (/^0(px)? 0(px)?$/i.test(bg)) return false;  // 未完成（第一帧）
-      }
-    } catch (e) {}
-    return null; // 信息不足，交给上层兜底
-  }
-
-  /* 从"当前在播视频"回溯到它所在的任务点容器 div.ans-attach-ct。
-     真站各版本嵌套深度不一，这里用多路兜底，尽量稳： */
-  function currentAttachCt(v) {
-    try {
-      const win = v && v.ownerDocument && v.ownerDocument.defaultView;
-      const fe = win && win.frameElement;             // 视频所在 iframe（位于内容页里）
-      if (!fe) return null;
-      /* ① 向上找 .ans-attach-ct（放宽到 12 层，防某些章节嵌套更深） */
-      let n = fe;
-      for (let i = 0; i < 12 && n; i++) {
-        if (n.classList && n.classList.contains('ans-attach-ct')) return n;
-        n = n.parentElement;
-      }
-      /* ② 原生 closest */
-      try { const c = fe.closest && fe.closest('.ans-attach-ct'); if (c) return c; } catch (e) {}
-      /* ③ 在 fe 所在文档里，找"真正包含 fe"的 .ans-attach-ct（最可靠，不依赖层级） */
-      const doc = fe.ownerDocument;
-      if (doc) {
-        let cts = null;
-        try { cts = doc.querySelectorAll('.ans-attach-ct'); } catch (e) {}
-        for (let i = 0; cts && i < cts.length; i++) {
-          if (cts[i].contains && cts[i].contains(fe)) return cts[i];
-        }
-      }
-      /* ④ 退：最近的"含 .ans-job-icon"的祖先 */
-      n = fe;
-      for (let i = 0; i < 12 && n; i++) {
-        if (n.querySelector && n.querySelector('.ans-job-icon, .ans-job-icon-clear')) return n;
-        n = n.parentElement;
-      }
-    } catch (e) {}
-    return null;
-  }
-
-  function setDoneMatch(el) {
-    try {
-      const s = el ? String(el.outerHTML || el.textContent || '') : '';
-      window.__cxDoneMatch = s.replace(/\s+/g, ' ').slice(0, 400);
-    } catch (e) {}
-  }
-
-  function detectVideoTaskCompleted(v) {
-    /* ① 真站权威：当前视频所在任务点容器 .ans-attach-ct 内的状态图标 .ans-job-icon */
-    try {
-      const ct = currentAttachCt(v);
-      if (ct) {
-        if (/\bans-job-finished\b/.test(ct.className || '')) { setDoneMatch(ct); return true; }
-        const icon = ct.querySelector('.ans-job-icon, .ans-job-icon-clear');
-        const d = jobIconDone(icon);
-        if (d === true) { setDoneMatch(icon); return true; }
-        if (d === false) return false;               // 本视频任务点明确"未完成" → 继续等（不被别人干扰）
-      }
-    } catch (e) {}
-    /* ② 退一步：视频 iframe 的直接父容器里的 .ans-job-icon（容器层级特殊时） */
-    try {
-      const win = v && v.ownerDocument && v.ownerDocument.defaultView;
-      const fe = win && win.frameElement;
-      if (fe && fe.parentElement) {
-        const icon = fe.parentElement.querySelector('.ans-job-icon, .ans-job-icon-clear');
-        const d = jobIconDone(icon);
-        if (d === true) { setDoneMatch(icon); return true; }
-        if (d === false) return false;
-      }
-    } catch (e) {}
-    /* ③ 兜底：元素的文本 **或 aria-label/title 属性** 含"任务点已完成"
-         （有的版本把状态字样写在属性里而非文本里；本地 mock 也走这条） */
-    try {
-      const docs = collectDocs();
-      const DONE = /任务点[\s：:·]*已\s*完成/;
-      const NOTDONE = /未完成/;
-      let best = null;
-      for (let i = 0; i < docs.length; i++) {
-        let els;
-        try { els = docs[i].querySelectorAll('*'); } catch (e) { continue; }
-        for (let j = 0; j < els.length; j++) {
-          const el = els[j];
-          const attr = ((el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title'))) || '').replace(/\s+/g, '');
-          const txt = (el.textContent || '').replace(/\s+/g, '');
-          let cand = '';
-          if (attr && attr.length <= 60 && DONE.test(attr) && !NOTDONE.test(attr)) cand = attr;
-          else if (txt && txt.length <= 60 && DONE.test(txt) && !NOTDONE.test(txt)) cand = txt;
-          if (!cand) continue;
-          if (isInCatalog(el)) continue;
-          if (!best || cand.length < best.len) best = { el: el, len: cand.length };
-        }
-      }
-      if (best) { setDoneMatch(best.el); return true; }
-    } catch (e) {}
-    return false;
-  }
-
-  /* 元素是否位于右侧课程目录内（posCatalog* 类名，或 id 含 catalog）——
-     避免把目录里其它章节的状态误当成"当前视频"的完成态。 */
-  function isInCatalog(el) {
-    let n = el;
-    for (let k = 0; k < 12 && n; k++) {
-      const cls = (typeof n.className === 'string') ? n.className : '';
-      const id = n.id || '';
-      if (/posCatalog/i.test(cls) || /catalog/i.test(id)) return true;
-      n = n.parentElement;
-    }
-    return false;
-  }
-
-  /* 诊断：抓取当前视频「任务点」面板的 HTML 节选，用于校准 / 排查。
-     仅在进入"等待完成"状态、超时时、以及命中完成时打印，方便你无需手动 F12 就把真实 DOM 发我校准。 */
-  function diagTaskPointHTML() {
-    const el = findCurrentTaskPointEl();
-    if (!el) return '(未找到当前视频任务点面板：页面里没有含"完成条件/观看时长"的元素)';
-    let s = '';
-    try { s = el.outerHTML; } catch (e) { s = el.textContent || ''; }
-    return (s || '').replace(/\s+/g, ' ').slice(0, 500);
-  }
-
-  /* 诊断：列出页面里所有"短文本且含'任务点'"的元素（可能是状态徽标"任务点已完成"/"任务点未完成"）。
-     进入"等待完成"时打印，万一完成文案和预期不同，凭这行就能一眼看到真站到底写了什么。 */
-  function diagTaskStatusLabels() {
-    const docs = collectDocs();
-    const out = [];
-    for (let i = 0; i < docs.length && out.length < 6; i++) {
-      let els;
-      try { els = docs[i].querySelectorAll('*'); } catch (e) { continue; }
-      for (let j = 0; j < els.length && out.length < 6; j++) {
-        const el = els[j];
-        const t = (el.textContent || '').replace(/\s+/g, '');
-        if (!t || t.length > 60 || t.indexOf('任务点') === -1) continue;
-        const tag = el.tagName ? el.tagName.toLowerCase() : '?';
-        const idp = el.id ? ('#' + el.id) : '';
-        const clsp = (typeof el.className === 'string' && el.className.trim())
-          ? ('.' + el.className.trim().replace(/\s+/g, '.')) : '';
-        out.push('<' + tag + idp + clsp + '>' + t);
-      }
-    }
-    return out.join(' | ');
-  }
-
-  /* 诊断：列出页面里所有 .ans-job-icon / .ans-job-icon-clear 的状态（aria-label + backgroundPosition）。
-     真站完成信号就藏在这，进入"等待完成"时打印一行，万一某次没切换，凭这行即可确认是"雪碧图没变位"还是"真没完成"。 */
-  function diagJobIcons() {
-    const docs = collectDocs();
-    const out = [];
-    for (let i = 0; i < docs.length && out.length < 8; i++) {
-      let icons;
-      try { icons = docs[i].querySelectorAll('.ans-job-icon, .ans-job-icon-clear'); } catch (e) { continue; }
-      for (let j = 0; j < icons.length && out.length < 8; j++) {
-        const ic = icons[j];
-        const al = (ic.getAttribute('aria-label') || ic.getAttribute('title') || '').replace(/\s+/g, '');
-        let bg = '';
-        try {
-          const win = ic.ownerDocument && ic.ownerDocument.defaultView;
-          if (win) bg = (win.getComputedStyle(ic).backgroundPosition || '').replace(/\s+/g, ' ').trim();
-        } catch (e) {}
-        const cls = (typeof ic.className === 'string' && ic.className.trim())
-          ? ('.' + ic.className.trim().replace(/\s+/g, '.')) : '';
-        out.push('<div' + cls + ' aria-label="' + al + '" bg="' + bg + '">');
-      }
-    }
-    return out.join(' | ');
-  }
-
   /* 执行"切下一节"：先等 SWITCH_DELAY_MS 让平台落库，再 goNext */
   function doSwitch() {
     switching = true;
@@ -805,7 +562,7 @@
     }, CFG.SWITCH_DELAY_MS);
   }
 
-  /* v1.3.19：给"当前视频"绑定原生 ended 事件，作为切下一节的唯一触发源。
+  /* 给"当前视频"绑定原生 ended 事件，作为切下一节的唯一触发源（默认 100% 行为）。
      每个视频只绑一次（以视频元素为键，避免重复绑定导致一次结束多次切）。 */
   function armEndedListener(v) {
     if (!v) return;
@@ -871,16 +628,12 @@
     /* 发现新视频：接管并播放 */
     if (key !== lastKey) {
       lastKey = key;
-      videoTaskThreshold = null;        // 新视频：清掉上一个视频缓存的任务点阈值
-      videoTaskThresholdTries = 0;
-      videoCompletedSignaled = false;   // 新视频：重置"已完成"信号
-      waitingCompleteSince = 0;         // 新视频：重置"等待完成"计时
       tabMissLogged = false;
       setStatus('已接管新视频，准备播放…');
       log('🎬 检测到视频：' + shortName(key) + '（时长 ' + fmtTime(v.duration) + '）');
       tryPlay(v);
       endedSwitchInitiated = false; // 新视频：重置"播放结束→切下一节"的发起标志
-      armEndedListener(v);          // 新视频：绑定原生 ended 事件（v1.3.19 起切下一节的唯一触发源）
+      armEndedListener(v);          // 新视频：绑定原生 ended 事件（切下一节的唯一触发源）
       return;
     }
 
@@ -901,15 +654,7 @@
     setStatus('播放中 ' + (ratio * 100).toFixed(1) + '%  (' +
               fmtTime(v.currentTime) + ' / ' + fmtTime(v.duration) + ')');
 
-    /* 一次性诊断：本视频播到 ~15% 时打印一次 .ans-job-icon 状态（每个视频仅一次），
-       万一某版本仍不切，凭这一行就能看到真站到底有没有 .ans-job-icon、属性是什么。 */
-    if (iconDiagKey !== key && ratio > 0.15) {
-      iconDiagKey = key;
-      const jic0 = diagJobIcons();
-      log('ℹ 本视频 .ans-job-icon 诊断：' + (jic0 || '(未找到 .ans-job-icon)'), 'info');
-    }
-
-    /* 切换触发逻辑（v1.3.19 起）：改由视频原生 ended 事件驱动（见 onVideoEnded）。
+    /* 切换触发逻辑：由视频原生 ended 事件驱动（见 onVideoEnded）。
        不再轮询"任务点完成"徽章（.ans-job-icon 雪碧图/aria-label），也不再按百分比门槛提前跳——
        那些是平台易变、曾导致"页面已显示完成、脚本却不切"的东西。
        这里只做一道"ended 状态保底"：万一监听器漏接（如平台重建 video 元素），只要轮询发现
@@ -951,7 +696,7 @@
       btn.textContent = running ? '⏸ 暂停自动' : '▶ 开始自动';
       btn.style.background = running ? '#e5533d' : '#1a7f37';
     }
-    /* v1.3.19 起切下一节由视频 ended 事件驱动，不再有「智能/100%」阈值切换按钮 */
+    /* 切下一节由视频 ended 事件驱动（默认 100%）；已删除「智能/100%」阈值切换按钮 */
     if (logEl) {
       let html = '';
       for (let i = logs.length - 1; i >= 0; i--) {
@@ -1007,9 +752,9 @@
       '    <button id="cx-next" style="cursor:pointer;border:1px solid #d0d5dd;border-radius:6px;padding:7px 10px;background:#fff;font-size:12px;">手动下一节</button>',
       '    <button id="cx-mute" title="切换静音/有声" style="cursor:pointer;border:1px solid #d0d5dd;border-radius:6px;padding:7px 9px;background:#fff;font-size:13px;">🔇</button>',
       '  </div>',
-      '  <div style="color:#475467;margin:0 0 8px;">切下一节：视频放完自动切（原生 <b>ended</b> 事件）</div>',
+      '  <div style="color:#475467;margin:0 0 8px;">切下一节：视频放完（100%）自动切（原生 <b>ended</b> 事件）</div>',
       '  <div id="cx-log" style="max-height:150px;overflow-y:auto;border-top:1px solid #eceff3;padding-top:6px;"></div>',
-      '  <div style="color:#98a2b3;margin-top:6px;">1 倍速 · 默认静音 · 视频放完(ended)自动切下一节 · 不绕过检测</div>',
+      '  <div style="color:#98a2b3;margin-top:6px;">1 倍速 · 默认静音 · 视频放完(100%/ended)自动切下一节 · 不绕过检测</div>',
       '</div>'
     ].join('');
 
@@ -1020,10 +765,6 @@
       if (running) {
         lastKey = '';
         switching = false;
-        videoTaskThreshold = null;
-        videoTaskThresholdTries = 0;
-        videoCompletedSignaled = false;
-        waitingCompleteSince = 0;
         tabMissLogged = false;
         lastTabTryAt = 0;
         endedBoundVideo = null;
@@ -1054,7 +795,7 @@
       renderPanel();
     });
 
-    /* v1.3.19 起：切下一节由视频原生 ended 事件驱动，不再提供「智能/100%」阈值切换按钮 */
+    /* 切下一节由视频原生 ended 事件驱动（默认 100%）；已删除「智能/100%」阈值切换按钮 */
 
     let collapsed = false;
     panel.querySelector('#cx-min').addEventListener('click', function () {
