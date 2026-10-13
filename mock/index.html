@@ -5,8 +5,11 @@
 <title>MOCK 顶层页面（模拟超星 studentstudy）</title>
 <style>
   body { margin:0; font:14px "Microsoft YaHei",sans-serif; display:flex; height:100vh; }
-  #left { flex:1; display:flex; }
-  #iframe { flex:1; border:0; }
+  #left { flex:1; display:flex; flex-direction:column; min-width:0; }
+  #content-head { padding:12px 16px; border-bottom:1px solid #eee; }
+  #ch-title { margin:0 0 8px; font-size:18px; color:#222; }
+  #tp-status { font-size:14px; color:#c87f0a; }
+  #iframe { flex:1; border:0; min-height:0; }
   #right { width:280px; border-left:1px solid #ddd; padding:10px; overflow:auto; }
   .posCatalog_level { padding:2px 0; }
   .posCatalog_select { display:block; padding:6px 8px; border-radius:6px; cursor:pointer; color:#333; }
@@ -18,12 +21,22 @@
 </head>
 <body>
   <input type="hidden" id="curChapterId" value="1001">
-  <div id="left"><iframe id="iframe" src="about:blank"></iframe></div>
+  <div id="left">
+    <!-- 模拟超星顶部「章节标题 + 任务点状态徽标」区：真站任务点完成时这里显示"✓ 任务点已完成"。
+         注意：它与视频页里的「任务点完成条件」小面板是**两个不同位置的元素**——真站实测，
+         完成徽标在标题下方，阈值面板在视频旁；脚本的完成检测必须能跨位置命中这个横幅。 -->
+    <div id="content-head">
+      <h2 id="ch-title">—</h2>
+      <div id="tp-status">任务点未完成</div>
+    </div>
+    <iframe id="iframe" src="about:blank"></iframe>
+  </div>
   <div id="right">
     <h3>目录</h3>
     <div id="cat"></div>
-    <!-- 回归测试用：模拟"课程里其它已经看完的章节"——页面上存在"已完成"文本。
-         脚本的智能检测必须**忽略**它（只看当前视频任务点面板），否则会"当前视频没完成就提前切"。 -->
+    <!-- 回归测试用：模拟"课程里其它已经看完的章节"——页面上存在裸"已完成"文本。
+         脚本的智能检测必须**忽略**它（只认"任务点已完成"这个当前视频独有的短语），
+         否则会"当前视频没完成就提前切"（v1.3.13 的 bug）。 -->
     <div id="other-completed" style="margin-top:10px;padding:6px 8px;background:#f6fff8;color:#1a7f37;border-radius:6px;">
       1.0 已学过的章节 · 已完成
     </div>
@@ -61,11 +74,22 @@
     });
     document.querySelectorAll('.posCatalog_select')[i].classList.add('posCatalog_active');
     document.getElementById('curChapterId').value = CHAPTERS[i].id;
+    // 切章：重置标题区的任务点状态徽标（新视频 = 未完成）
+    document.getElementById('ch-title').textContent = CHAPTERS[i].name;
+    var st = document.getElementById('tp-status');
+    st.textContent = '任务点未完成';
+    st.style.color = '#c87f0a';
     // 模拟超星：切换章节 = 重载第一层内嵌 iframe（注意顶层不动，URL 也不变）
     document.getElementById('iframe').src = 'layer1.html?n=' + (i + 1);
   }
 
-  /* 供 layer2 调用：把"当前激活的目录节点"标记为已完成（模拟超星任务点完成） */
+  /* 供 layer2 调用：模拟"平台落库完成"后，顶部标题区出现"✓ 任务点已完成"（脚本据此判定可切） */
+  window.markTaskComplete = function () {
+    var st = document.getElementById('tp-status');
+    if (st) { st.textContent = '✓ 任务点已完成'; st.style.color = '#1a7f37'; }
+  };
+
+  /* 供 layer2 调用：把"当前激活的目录节点"标记为已完成（模拟超星目录任务点完成，仅视觉） */
   window.markActiveComplete = function () {
     var act = document.querySelector('.posCatalog_select.posCatalog_active') ||
               document.querySelector('.posCatalog_active');

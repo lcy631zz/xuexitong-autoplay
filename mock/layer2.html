@@ -142,17 +142,17 @@
   };
 
   setInterval(function () {
-    /* 视频真正结束后：平台**延迟 2 秒**才把「任务点」面板翻成"已完成"（模拟超星落库延迟，
-       即"视频播完了、面板还没显示完成"的那段窗口）。脚本智能模式必须等这个显式信号才切。 */
+    /* 视频真正结束后：平台**延迟 2 秒**才把「任务点」标记为完成（模拟超星落库延迟，
+       即"视频播完了、页面还没显示完成"的那段窗口）。脚本智能模式必须等这个显式信号才切。 */
     if (v.ended && !window.__completeAt) window.__completeAt = Date.now() + 2000;
     if (window.__completeAt && !window.__markedComplete && Date.now() >= window.__completeAt) {
       window.__markedComplete = true;
       try {
-        var p = document.getElementById('taskpoint-panel');
-        /* 保留"完成条件/观看时长"锚点文本（脚本靠它定位本视频任务点），只在末尾加上"已完成"，
-           模拟超星"要求文案还在、状态翻成已完成"的真实表现；去掉"未完成"以免被排除规则误伤。 */
-        if (p) p.innerHTML = '任务点 <span style="color:#1a7f37;">●</span> 完成条件 观看时长需 ≥ 总时长的 90%（已完成，本视频任务点完成）';
         var top = window.parent && window.parent.parent;
+        /* 真站：平台落库完成后，**顶部标题区**出现"✓ 任务点已完成"（与视频旁的阈值小面板是两个元素）。
+           注意这里**不改** #taskpoint-panel —— 它保持"未完成任务点前…"，以验证完成检测确实靠
+           顶部横幅、而不是靠阈值面板的文案。 */
+        if (top && top.markTaskComplete) top.markTaskComplete();
         if (top && top.markActiveComplete) top.markActiveComplete();
       } catch (e) {}
     }

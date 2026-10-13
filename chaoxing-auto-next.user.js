@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         超星学习通 · 自动播放 + 播完自动下一节
 // @namespace    workbuddy.chaoxing.autonext
-// @version      1.3.15
+// @version      1.3.16
 // @description  自动播放当前章节的视频；播放完成后自动点击右侧目录的下一节并继续播放。不加速、不绕过平台的防挂机检测（视频内弹出的单选/多选题会自动尝试作答，多选暴力枚举组合）。
 // @author       WorkBuddy
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -601,32 +601,48 @@
   }
 
   /* 智能模式：检测"页面是否已明确显示【本视频】任务点完成"。
-     关键：必须限定在"当前这个视频的任务点"范围内，不能搜整个页面——
-     页面里其它已看完的章节 / 课程也会显示"已完成"，若不限范围会把那些也算进来，导致"当前视频还没完成就提前切"。
-     做法：先定位当前视频的「任务点」面板（findCurrentTaskPointEl），再从该元素向上逐层搜索，
-          但**子树文本一旦超过 400 字就停止上溯**——只覆盖本视频任务点那一小块（要求文案 + 状态徽标），
-          不爬进包含右侧目录 / 其它已看完章节的大容器（那里也有"已完成"，否则会误判提前切）。
-     判定（基于文本，不依赖固定 class）：
-       正向完成文案：已完成 / 任务完成 / 已学完 / 学习完成 / 已看完 / 已经完成 / 完成✔ / 完成✓
-       排除"未完成"（"未完成任务点前…"这种提示不是完成态）。
-     注：不把"完成条件"当完成信号——那是静态的"要求文案"，一直都在，不代表已完成。 */
+     真站权威信号（据用户真站截图锁定）：视频上方标题区会显示一个**绿色状态徽标「任务点已完成」**
+     （未完成时显示"任务点未完成"或不显示）。截图实拍：标题下方一行"✓ 任务点已完成"。
+     关键取舍：
+       - 只认"任务点已完成"这个**完整短语**，不认裸"已完成"。
+         裸"已完成"会误命中右侧目录里其它早已看完的章节（这正是 v1.3.13 的 bug 根源：
+         搜整页"已完成"→ 被别的章节带偏 → 当前视频没完成就提前切）。
+         "任务点已完成"是当前视频独有的状态徽标，既对齐真站、又天然避开目录干扰。
+       - 只认"短标签"元素（文本 ≤ 60 字），排除把整页/目录算进来的大容器。
+       - 排除含"未完成"的（"任务点未完成""未完成任务点前…"都不是完成态）。
+       - 兜底再排除位于右侧目录（posCatalog* / id 含 catalog）内的元素。
+     注：不把静态的"完成条件 / 观看时长需 ≥…"要求文案当完成信号——那是要求，一直都在。 */
   function detectVideoTaskCompleted() {
-    const anchor = findCurrentTaskPointEl();
-    if (!anchor) return false;
-    const DONE = /(已完成|任务完成|已学完|学习完成|已看完|已经完成|完成✔|完成✓)/;
-    const NOTDONE = /(未完成)/;
-    /* 从锚点向上逐层搜索，但**一旦某层子树文本过长就停止上溯**——
-       这样只覆盖"本视频任务点那一小块"（要求文案 + 状态徽标，通常几十字），
-       不会爬到包含右侧目录/其它已看完章节的大容器（那里也有"已完成"，会误判提前切）。 */
-    let node = anchor;
-    for (let lvl = 0; lvl < 8 && node; lvl++) {
-      const txt = (node.textContent || '').trim();
-      if (txt.length > 400) break;   // 容器过大 → 已跑到整页/含目录，停止，避免把别的"已完成"算进来
-      if (txt && DONE.test(txt) && !NOTDONE.test(txt)) {
-        try { window.__cxDoneMatch = (node.outerHTML || txt).replace(/\s+/g, ' ').slice(0, 400); } catch (e) {}
-        return true;
+    const docs = collectDocs();
+    const DONE = /任务点[\s：:·]*已\s*完成/;   // 真站徽标"任务点已完成"（当前视频独有，不会命中目录里的裸"已完成"）
+    const NOTDONE = /未完成/;
+    let best = null;
+    for (let i = 0; i < docs.length; i++) {
+      let els;
+      try { els = docs[i].querySelectorAll('*'); } catch (e) { continue; }
+      for (let j = 0; j < els.length; j++) {
+        const el = els[j];
+        const t = (el.textContent || '').replace(/\s+/g, '');
+        if (!t || t.length > 60) continue;              // 只要"短状态标签"，不要大容器
+        if (!DONE.test(t) || NOTDONE.test(t)) continue; // 必须是"任务点已完成"且不含"未完成"
+        if (isInCatalog(el)) continue;                  // 目录里的不算（防别的章节）
+        if (!best || t.length < best.len) best = { el: el, len: t.length }; // 取"最短"命中 = 状态徽标本身
       }
-      node = node.parentElement;
+    }
+    if (!best) return false;
+    try { window.__cxDoneMatch = (best.el.outerHTML || best.el.textContent || '').replace(/\s+/g, ' ').slice(0, 400); } catch (e) {}
+    return true;
+  }
+
+  /* 元素是否位于右侧课程目录内（posCatalog* 类名，或 id 含 catalog）——
+     避免把目录里其它章节的状态误当成"当前视频"的完成态。 */
+  function isInCatalog(el) {
+    let n = el;
+    for (let k = 0; k < 12 && n; k++) {
+      const cls = (typeof n.className === 'string') ? n.className : '';
+      const id = n.id || '';
+      if (/posCatalog/i.test(cls) || /catalog/i.test(id)) return true;
+      n = n.parentElement;
     }
     return false;
   }
@@ -639,6 +655,28 @@
     let s = '';
     try { s = el.outerHTML; } catch (e) { s = el.textContent || ''; }
     return (s || '').replace(/\s+/g, ' ').slice(0, 500);
+  }
+
+  /* 诊断：列出页面里所有"短文本且含'任务点'"的元素（可能是状态徽标"任务点已完成"/"任务点未完成"）。
+     进入"等待完成"时打印，万一完成文案和预期不同，凭这行就能一眼看到真站到底写了什么。 */
+  function diagTaskStatusLabels() {
+    const docs = collectDocs();
+    const out = [];
+    for (let i = 0; i < docs.length && out.length < 6; i++) {
+      let els;
+      try { els = docs[i].querySelectorAll('*'); } catch (e) { continue; }
+      for (let j = 0; j < els.length && out.length < 6; j++) {
+        const el = els[j];
+        const t = (el.textContent || '').replace(/\s+/g, '');
+        if (!t || t.length > 60 || t.indexOf('任务点') === -1) continue;
+        const tag = el.tagName ? el.tagName.toLowerCase() : '?';
+        const idp = el.id ? ('#' + el.id) : '';
+        const clsp = (typeof el.className === 'string' && el.className.trim())
+          ? ('.' + el.className.trim().replace(/\s+/g, '.')) : '';
+        out.push('<' + tag + idp + clsp + '>' + t);
+      }
+    }
+    return out.join(' | ');
   }
 
   /* 执行"切下一节"：先等 SWITCH_DELAY_MS 让平台落库，再 goNext */
@@ -772,6 +810,8 @@
             '%），开始等待页面明确标记「任务完成」后再切（不再按百分比提前跳）', 'info');
         const diag = diagTaskPointHTML();
         if (diag) log('ℹ 等待期任务点面板 HTML(节选)：' + diag, 'info');
+        const cand = diagTaskStatusLabels();
+        if (cand) log('ℹ 等待期"任务点"状态标签候选：' + cand, 'info');
       }
       const waited = Date.now() - waitingCompleteSince;
       if (waited > CFG.COMPLETE_MAXWAIT_MS) {
