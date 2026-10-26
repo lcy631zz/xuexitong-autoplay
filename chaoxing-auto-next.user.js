@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         超星学习通 · 自动播放 + 播完自动下一节
 // @namespace    workbuddy.chaoxing.autonext
-// @version      1.3.20
+// @version      1.3.21
 // @description  自动播放当前章节的视频；播放完成后自动点击右侧目录的下一节并继续播放。不加速、不绕过平台的防挂机检测（视频内弹出的单选/多选题会自动尝试作答，多选暴力枚举组合）。
 // @author       WorkBuddy
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -16,6 +16,8 @@
  * 本脚本只做两件"免手动操作"的事：
  *   1) 进入某节后，自动点一下播放键（你本来也要点的）；
  *   2) 切下一节：视频播放到 100% 自然结束（原生 ended 事件）就自动切到下一节。v1.3.20 已彻底删除"智能/100%"阈值切换按钮，只保留这一种"默认百分百"行为（对齐主流 2.8k★ 脚本）：
+ *      · v1.3.21 起支持「一页多个视频」：某段视频放完后，先检查本节还有没有别的可见视频没看完——
+ *        有就接着看下一个（不切章），全部看完才切到下一节。
  *        · 进入某节、接管 <video> 后，给视频绑定原生 addEventListener('ended', …)；
  *        · 视频一旦播放到 100%（浏览器原生 ended 事件），等 SWITCH_DELAY_MS 让平台落库，再点右侧目录的下一节；
  *        · **不再轮询"任务点完成"徽章**（.ans-job-icon 的雪碧图换位 / aria-label——这些是平台易变、
@@ -76,6 +78,7 @@
   let lastKey = '';              // 当前已接管的视频标识
   let endedBoundVideo = null;     // 已绑定 ended 监听的视频元素（每个视频只绑一次）
   let endedSwitchInitiated = false; // 本视频的"播放结束→切下一节"是否已发起（防 ended 事件重复/抖动触发）
+  let watchedKeys = {};           // 本节（当前页面）已经放完的视频标识集合（多视频页：放完一个接着看下一个，全部放完才切章）
   let lastTabTryAt = 0;          // 上次尝试点「视频」标签的时间
   let tabMissLogged = false;     // 「本节没有视频标签」只提醒一次
   let quizState = null;          // 当前正在处理的弹题状态
@@ -148,6 +151,30 @@
     }
     out.sort(function (a, b) { return (b.duration || 0) - (a.duration || 0); });
     return out;
+  }
+
+  /* 当前页面里"看得见"的 <video>，按 DOM 顺序返回（多视频页用于从上到下逐个看）。
+     与 findVideos 不同：这里不按时长排序，保持页面上的先后顺序。 */
+  function activeVideos() {
+    const out = [];
+    const docs = collectDocs();
+    for (let i = 0; i < docs.length; i++) {
+      let vs = [];
+      try { vs = docs[i].querySelectorAll('video'); } catch (e) { continue; }
+      for (let j = 0; j < vs.length; j++) {
+        if (isVisible(vs[j])) out.push(vs[j]);
+      }
+    }
+    return out; // 已是各 document 内的 DOM 顺序（外层 doc 先、iframe 后）
+  }
+
+  /* 本节里第一个"还没放完"的可见视频（跳过已记入 watchedKeys 的） */
+  function firstUnwatchedVisible() {
+    const actives = activeVideos();
+    for (let i = 0; i < actives.length; i++) {
+      if (!watchedKeys[videoKey(actives[i])]) return actives[i];
+    }
+    return null;
   }
 
   function videoKey(v) {
@@ -558,6 +585,7 @@
       lastKey = '';
       tabMissLogged = false;
       lastTabTryAt = 0;
+      watchedKeys = {}; // 进入新的一节，清空"本节已放完视频"记录，重新从第一个视频看起
       setTimeout(function () { switching = false; }, ok ? 4000 : 1200);
     }, CFG.SWITCH_DELAY_MS);
   }
@@ -575,11 +603,29 @@
     try { v.addEventListener('ended', onVideoEnded); } catch (e) {}
   }
 
+  /* 一个视频放完（ended 事件或轮询兜底）的统一处理：
+     - 先把这个视频记入"已放完"；
+     - 再看本节还有没有"还没放完的可见视频"：有就接着看下一个（不切章），全部放完才切下一节。 */
+  function handlePlaybackDone(key) {
+    if (endedSwitchInitiated) return;            // 防止同一次结束被 ends 事件 + 轮询兜底重复处理
+    endedSwitchInitiated = true;
+    if (key) watchedKeys[key] = true;            // 标记本节这个视频已看完
+    const next = firstUnwatchedVisible();
+    if (next) {
+      /* 本节还有别的视频没看 → 不切章，接着看下一个 */
+      log('📼 本节还有未看完的视频，接着看下一个（不切章）', 'ok');
+      endedSwitchInitiated = false;              // 允许下一个视频放完时再次触发
+      lastKey = '';                              // 让 tick 接管下一个视频（重新播放+绑 ended）
+      return;
+    }
+    /* 本节所有可见视频都放完了 → 切下一节 */
+    log('🏁 本节所有视频已放完，准备切下一节', 'ok');
+    doSwitch();
+  }
+
   function onVideoEnded() {
     if (endedSwitchInitiated) return;            // 防 ended 事件重复/抖动触发
-    endedSwitchInitiated = true;
-    log('🏁 视频播放结束（原生 ended 事件），准备切下一节', 'ok');
-    doSwitch();
+    handlePlaybackDone(videoKey(endedBoundVideo));
   }
 
   /* ================================================================
@@ -609,17 +655,22 @@
       quizState = null;
     }
 
-    const vids = findVideos();
-    /* 优先用"看得见"的视频（隐藏的 <video> 播了也不算数） */
-    const v = vids.filter(isVisible)[0];
+    const vids = findVideos();                 // 仅用于"页面有没有视频"的状态判断
+    /* 多视频页：优先看"本节还没放完的可见视频"（按 DOM 顺序从上到下逐个看） */
+    const v = firstUnwatchedVisible();
 
     if (!v) {
-      if (vids.length) {
-        setStatus('检测到视频但当前标签页里看不到它，正在切到「视频」标签…');
-      } else {
-        setStatus('当前页面还没出现视频，正在尝试切到「视频」标签页…');
+      /* 没有"还没放完的可见视频"：
+         - 页面压根没有可见视频（视频标签没点 / 还没加载）→ 尝试切到「视频」标签；
+         - 可见视频都已记入 watchedKeys（本节已全部看完）→ 切章由 handlePlaybackDone 发起，这里等推进即可。 */
+      if (activeVideos().length === 0) {
+        if (vids.length) {
+          setStatus('检测到视频但当前标签页里看不到它，正在切到「视频」标签…');
+        } else {
+          setStatus('当前页面还没出现视频，正在尝试切到「视频」标签页…');
+        }
+        maybeClickVideoTab();
       }
-      maybeClickVideoTab();
       return;
     }
 
@@ -658,11 +709,10 @@
        不再轮询"任务点完成"徽章（.ans-job-icon 雪碧图/aria-label），也不再按百分比门槛提前跳——
        那些是平台易变、曾导致"页面已显示完成、脚本却不切"的东西。
        这里只做一道"ended 状态保底"：万一监听器漏接（如平台重建 video 元素），只要轮询发现
-       v.ended 且还没发起切换，就补一次切换（与 ended 事件同一条件，不是新增百分比逻辑）。 */
+       v.ended 且还没发起切换，就补一次（与 ended 事件同一处理：先看本节还有没有别的视频没看完，
+       全部看完才切章）。 */
     if (v.ended && !endedSwitchInitiated && !switching) {
-      log('🏁 视频已播完（ended 状态保底触发），准备切下一节', 'ok');
-      endedSwitchInitiated = true;
-      doSwitch();
+      handlePlaybackDone(key);
       return;
     }
   }
@@ -752,9 +802,9 @@
       '    <button id="cx-next" style="cursor:pointer;border:1px solid #d0d5dd;border-radius:6px;padding:7px 10px;background:#fff;font-size:12px;">手动下一节</button>',
       '    <button id="cx-mute" title="切换静音/有声" style="cursor:pointer;border:1px solid #d0d5dd;border-radius:6px;padding:7px 9px;background:#fff;font-size:13px;">🔇</button>',
       '  </div>',
-      '  <div style="color:#475467;margin:0 0 8px;">切下一节：视频放完（100%）自动切（原生 <b>ended</b> 事件）</div>',
+      '  <div style="color:#475467;margin:0 0 8px;">切下一节：视频放完（100%）自动切（原生 <b>ended</b> 事件）；一节多视频会逐个看完再切</div>',
       '  <div id="cx-log" style="max-height:150px;overflow-y:auto;border-top:1px solid #eceff3;padding-top:6px;"></div>',
-      '  <div style="color:#98a2b3;margin-top:6px;">1 倍速 · 默认静音 · 视频放完(100%/ended)自动切下一节 · 不绕过检测</div>',
+      '  <div style="color:#98a2b3;margin-top:6px;">1 倍速 · 默认静音 · 视频放完(100%/ended)自动切下一节(多视频逐一看完再切) · 不绕过检测</div>',
       '</div>'
     ].join('');
 

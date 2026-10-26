@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>layer2_multi - 一页两个视频</title>
+<style>
+  html,body{margin:0;height:100%;background:#111;color:#eee;font:14px "Microsoft YaHei",sans-serif;position:relative}
+  .tabs{display:flex;gap:6px;padding:8px 10px;background:#1c1c1c}
+  .tab{padding:5px 12px;border-radius:4px;background:#2a2a2a;color:#bbb;cursor:pointer}
+  .tab.on{background:#3b6ea5;color:#fff}
+  #pane-video{display:block;padding:0 10px}
+  video{width:100%;height:34%;background:#000;object-fit:contain;display:block;margin-bottom:6px}
+  #hud{padding:8px 12px;color:#8f8;font-size:12px}
+</style>
+</head>
+<body>
+  <div class="tabs" id="tabs">
+    <span class="tab on" data-i="2">3 视频</span>
+  </div>
+  <!-- 模拟「一节里有两段视频」：两个真实可见的 <video>，分别用不同 src 区分 -->
+  <div id="pane-video">
+    <video id="v1"></video>
+    <video id="v2"></video>
+    <div id="hud">--</div>
+  </div>
+<script>
+  var n = new URLSearchParams(location.search).get('n') || '1';
+  var DUR = 10, MS_PER_SEC = 1000;
+
+  /* 造一个"假视频"：进度用真实时间算，播到 DUR 自动派发原生 ended 事件。
+     srcTag 用来让两个视频的 src 不同（脚本靠 src 区分"是不是同一个视频"）。 */
+  function makeFakeVideo(v, srcTag) {
+    v.setAttribute('src', 'mock-multi-' + srcTag + '.mp4');
+    var accum = 0, segStart = 0;
+    function segElapsed() { return segStart ? (Date.now() - segStart) / MS_PER_SEC : 0; }
+    function elapsed() { return accum + segElapsed(); }
+    Object.defineProperty(v, 'duration',    { get: function () { return DUR; }, configurable: true });
+    Object.defineProperty(v, 'currentTime', { get: function () { return Math.min(DUR, elapsed()); }, set: function () {}, configurable: true });
+    Object.defineProperty(v, 'paused',      { get: function () { return segStart === 0; }, configurable: true });
+    Object.defineProperty(v, 'ended',       { get: function () { return segStart !== 0 && elapsed() >= DUR; }, configurable: true });
+    var playKey = '__playCalls_' + srcTag;
+    window[playKey] = 0;
+    v.play  = function () { window[playKey]++; if (segStart === 0) segStart = Date.now(); return Promise.resolve(); };
+    v.pause = function () { if (segStart !== 0) { accum += segElapsed(); segStart = 0; } };
+    setInterval(function () {
+      if (v.ended && !v.__endedDispatched) {
+        v.__endedDispatched = true;
+        try { v.dispatchEvent(new Event('ended')); } catch (e) {}
+      }
+    }, 200);
+    return {
+      getState: function () {
+        return { src: srcTag, t: v.currentTime, paused: v.paused, ended: v.ended, playCalls: window[playKey] };
+      }
+    };
+  }
+
+  var f1 = makeFakeVideo(document.getElementById('v1'), 'a');
+  var f2 = makeFakeVideo(document.getElementById('v2'), 'b');
+
+  window.__state = function () {
+    return { n: n, multi: true, v1: f1.getState(), v2: f2.getState() };
+  };
+
+  setInterval(function () {
+    var v1 = document.getElementById('v1'), v2 = document.getElementById('v2');
+    document.getElementById('hud').textContent =
+      'multi  v1 t=' + v1.currentTime.toFixed(1) + '/' + DUR + ' ended=' + v1.ended +
+      ' | v2 t=' + v2.currentTime.toFixed(1) + '/' + DUR + ' ended=' + v2.ended;
+  }, 250);
+</script>
+</body>
+</html>

@@ -20,7 +20,8 @@
   </div>
 <script>
   var n = new URLSearchParams(location.search).get('n') || '1';
-  document.getElementById('vframe').src = 'layer2.html?n=' + n;
+  var multi = new URLSearchParams(location.search).get('multi');
+  document.getElementById('vframe').src = (multi ? 'layer2_multi.html' : 'layer2.html') + '?n=' + n;
 
   /* 模拟超星落库完成：把当前任务点图标标记为已完成。
      真站完成态写在这两处（脚本据此判定）：
